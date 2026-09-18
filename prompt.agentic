@@ -1,0 +1,1120 @@
+# BUILD PROMPT — SCP Episode Intelligence Layer (Hybrid Architecture)
+### Self-contained implementation brief. Assumes no prior knowledge of this project.
+
+> **Placement.** Repo root as `COPILOT.md`, `.github/copilot-instructions.md`,
+> `CLAUDE.md`, or `AGENTS.md` — whichever your agent reads. Do not paste as a
+> chat turn. Point the agent at a numbered section per task.
+>
+> **Fill every `[FILL]` in Section 1 before first use.** An agent that guesses
+> your stack produces code you throw away.
+
+---
+
+# 0. READ THIS FIRST
+
+You are building a **post-detection decision-support layer** for trade
+surveillance at a regulated bank. Its output is evidence shown to a human
+supervisor who carries personal regulatory accountability for the decision they
+make. Every constraint in this document descends from that fact.
+
+## 0.1 Three things to internalise
+
+1. **A confident wrong answer is worse than no answer.** Degraded, partial,
+   uncertain and inferred states must remain visibly so, all the way to the
+   screen. Never fill a gap with a plausible default.
+2. **Everything is evidence in a future audit.** A decision made today may be
+   examined in seven years. Reproduce exactly what was shown, from what inputs,
+   by which version — not an approximation.
+3. **Conservative constraints here are load-bearing.** Several will look
+   unnecessarily restrictive. One incorrect grouping presented to a supervisor
+   destroys trust in the layer permanently. Do not relax one because it is
+   inconvenient.
+
+## 0.2 Your behavioural rules
+
+- Do not resolve ambiguity silently. **Stop and ask.**
+- Do not invent numeric values. See Section 2.
+- Do not renegotiate anything marked SETTLED. If you disagree, implement it and
+  record the disagreement in one labelled note. Do not build around it.
+- Implement one section per task. Do not scaffold the whole system in one pass.
+- Do not write to the CAL alert store under any circumstance, via any path.
+- Do not give any agent a write tool.
+
+---
+
+# 1. TARGET ENVIRONMENT — FILL BEFORE USE
+
+```
+Language / runtime:          [FILL]
+Web framework:               [FILL]
+Persistence:                 [FILL]
+Migration tool:              [FILL]
+CDC / streaming transport:   [FILL]
+Job scheduler:               [FILL]
+Cache:                       [FILL]
+LLM provider + model:        [FILL]  (pinned version string required)
+Agent framework:             [FILL]  or "direct SDK, no framework"
+ML runtime (if IF enabled):  [FILL]
+Artifact store:              [FILL]
+Config management:           [FILL]
+Secrets management:          [FILL]
+Observability stack:         [FILL]
+Test framework:              [FILL]
+Repo state:                  [FILL: greenfield | existing, conventions at ...]
+Deployment target:           [FILL]
+Daily alert volume:          [FILL]
+Peak burst:                  [FILL]
+Concurrent supervisors:      [FILL]
+Data residency constraints:  [FILL]
+```
+
+Unfilled line → ask before writing code. Do not assume.
+
+---
+
+# 2. SETTLED / PLACEHOLDER / UNKNOWN
+
+Consult before writing any constant.
+
+## 2.1 SETTLED — implement exactly
+
+- Read-only relationship to SCP and the CAL alert store
+- Human-in-the-loop: no autonomous sign-off, RFI, or ownership move
+- Append-only, bitemporal persistence throughout
+- Three alert types: `CANCEL`, `AMEND`, `LATE`
+- Episode linking is **already built**; consume its sealed payload, do not modify
+- **Compute deterministically, interpret agentically** — no agent produces a
+  number, a score, or a rank
+- Agent layer is read-only, non-authoritative, and never a dependency of the queue
+- Rule baseline score is mandatory and standalone; Isolation Forest is optional
+  behind a flag
+- Prioritisation sort terminates in `episode_id`
+- Overrides are deterministic config evaluated outside any model
+- Linkage rationale is templated from edges, never generated
+- Every agent claim must trace to a tool result, validated programmatically
+- `lineage_root_id` for history; `as_of_ts` for time cutoffs
+
+## 2.2 PLACEHOLDER — read from config, never a literal
+
+Fail loudly at startup if absent. Never default.
+
+```
+# Prioritisation
+priority.urgency.critical_business_days      1
+priority.urgency.near_business_days          3
+priority.evidence.high_percentile            95
+priority.evidence.elevated_percentile        85
+priority.starvation_escalate_days            10
+priority.b0_share_alarm_pct                  10
+priority.default_deadline_business_days      5
+
+# Signal store
+signal.trader_baseline_window_days           365
+signal.lateness_baseline_window_days         90
+signal.recurrence_windows_days               [30, 90]
+signal.peer_min_population                   30
+signal.series_zscore_window_days             90
+
+# Scoring
+scoring.isolation_forest.enabled             false
+scoring.isolation_forest.weight              0.4
+scoring.rule_baseline.weight                 0.6
+scoring.model_timeout_ms                     2000
+
+# Agent layer
+agent.model_version                          [FILL — pinned string]
+agent.temperature                            0.0
+agent.max_tool_calls_per_episode             12
+agent.tool_timeout_ms                        5000
+agent.total_budget_ms                        30000
+agent.validation.reject_on_unsourced_number  true
+
+# Queue
+queue.promote_provisional_when_urgency_at    CRITICAL
+```
+
+Never derive a new constant from a placeholder. Needed value not on this list →
+add to config and flag it.
+
+## 2.3 UNKNOWN — business or compliance input required
+
+Flag and stop if your work depends on one:
+
+1. Review SLA per alert type (CANCEL, AMEND, LATE)
+2. Firm materiality notional threshold for the B0 override
+3. Retention period for signals, scores, narratives and traces
+4. Entitlement policy for episodes spanning permission boundaries
+5. Supervisor capacity for the inlier control sample
+6. Whether Isolation Forest is admitted at all, or the score stays rule-only
+7. **Model risk function's position on LLM-generated narrative in the review
+   path** — critical path. If refused, the Analyst agent is removed and replaced
+   with templated explanations; build Phase 1 accordingly.
+
+---
+
+# 3. CONTEXT AND ARCHITECTURE
+
+## 3.1 The business problem
+
+SCP, an existing rule engine, detects trade surveillance violations correctly.
+Detection is not the problem. A single business action — a trader cancelling a
+trade and rebooking its replacement — fires two or three independent SCP alerts
+with nothing connecting them. Supervisors manually determine which alerts belong
+together and reconstruct the business story before review can begin. There is no
+consistent prioritisation against deadlines.
+
+**This system removes reconstruction overhead and prioritises the queue. It does
+not improve detection.**
+
+## 3.2 Architecture
+
+```
+                    CAL alert store  (read-only source)
+                            │
+┌───────────────────────────┼───────────────────────┐
+│  DETERMINISTIC SPINE      ▼   — system of record  │
+│                                                   │
+│   [A] Ingest and normalise                        │
+│           │                                       │
+│   [B] Episode linking       ALREADY BUILT         │
+│           │                                       │
+│   [C] Signal store  ───────────────────────────────────┐
+│           │                                       │    │ read-only
+│   [D] Score  (rules mandatory, IF optional)       │    │ typed tools
+│           │                                       │    │
+│   [E] Prioritised queue                           │    │
+└───────────┼───────────────────────────────────────┘    │
+            │           ┌─────────────────────────────────▼──┐
+            │           │  [F] AGENT LAYER — read-only       │
+            │           │      Case builder → Analyst        │
+            │           │      Review assistant, Drafting    │
+            │           └────────────────┬───────────────────┘
+            ▼                            ▼
+        ┌────────────────────────────────────────┐
+        │  [G] Supervisor — sole accountable     │
+        │      Sign-off | RFI | Move | None      │
+        └────────────────┬───────────────────────┘
+                         ▼
+              [H] Outcomes and feedback
+```
+
+**Load-bearing property:** delete the agent layer entirely and the spine still
+produces a ranked, defensible queue. The agent layer is additive, never a
+dependency. Enforce this with an integration test, not a comment.
+
+## 3.3 Stage isolation
+
+Each stage reads only the sealed contract from its predecessor. The signal store
+never reads the edge store. Scoring never reads raw alerts. Agents never read
+any store directly — only through typed tools. Violating this produces two
+computations of the same fact that drift apart, surfacing as an inexplicable
+number rather than an error.
+
+## 3.4 Provenance
+
+This is a deliberate reduction of a larger prior design. Do not reintroduce cut
+components.
+
+| Component | Status | Reason |
+|---|---|---|
+| Ingest, blocklist, trust registry | Kept | Highest-leverage control in the system |
+| Episode linking | Kept, already built | Deterministic joins; an agent here would be slower, costlier, non-reproducible, hallucination-prone |
+| Feature store platform | Reduced to signal store | Existed to feed five models; one model needs aggregates |
+| Rule baseline | Kept, now primary | Fallback, benchmark, and the whole score in rule-only mode |
+| Isolation Forest | Kept behind a flag | Real value on numeric outliers; flagged so governance can approve rule-only first |
+| LOF | **Cut** | Recoverable from precomputed peer percentiles at a fraction of the cost |
+| One-Class SVM | **Cut** | Redundant with IF, poor scaling |
+| Autoencoder | **Cut** | Unjustified at ~40 features and three alert types |
+| Prophet | **Cut** | Replaced by rolling z-score on counts |
+| Ensemble consensus, cross-model percentile normalisation, frozen reference windows | **Cut** | Existed solely to combine five incomparable scores |
+| Prioritisation logic | Kept unchanged | Pure policy; must stay deterministic |
+| Templated linkage rationale | Kept unchanged | Must be exactly true, therefore not generated |
+| SHAP | Kept only if IF enabled | Rule-only score explains itself |
+| Narrative machinery | Replaced by Analyst agent | Where LLMs genuinely beat templates |
+| Free-text handling | **New** | Prior design had none; strongest argument for the agent layer |
+
+---
+
+# 4. DATA MODEL
+
+All tables bitemporal and append-only unless stated. `valid_from`/`valid_to` =
+business time. `recorded_at` = system time. **No `UPDATE` on any table below
+except `queue_projection` and `review_outcome` status fields.**
+
+```sql
+-- Read-only projection of CAL. Written only by Stage A. Never by anything else.
+alert_fact (
+  alert_id            PK
+  alert_type          enum CANCEL|AMEND|LATE
+  alert_ts, event_ts, booking_ts, execution_ts
+  trade_urn, alt_trade_id, lifecycle_ref, package_id, allocation_group
+  trader_id, desk, book, counterparty_id, product_key, asset_class
+  notional, currency, direction, price_or_rate
+  amended_fields      jsonb      -- AMEND only
+  lateness_minutes                -- LATE only
+  cancel_reason_code              -- CANCEL only
+  free_text           jsonb       -- untrusted; see §9.4
+  entitlement_class
+  source_system, source_ruleset_version
+  blocklist_hits      jsonb       -- which identifiers were suppressed
+  ingest_ts, recorded_at
+)
+INDEX (trade_urn), (alt_trade_id), (trader_id, event_ts), (package_id)
+
+-- Emitted by Stage B (already built). Consume; do not write.
+episode (
+  episode_id, episode_version   PK composite
+  lineage_root_id               -- USE THIS for all history
+  status              enum PROVISIONAL|STABLE|FROZEN
+  supersedes          text[]
+  continuation_of
+  as_of_ts                       -- authoritative cutoff
+  ruleset_version, blocklist_version
+  structural_facts    jsonb
+  entitlement_class
+  recorded_at
+)
+INDEX (lineage_root_id), (status, as_of_ts)
+
+episode_member (episode_id, episode_version, alert_id, ordinal)
+episode_edge   (episode_id, episode_version, rule_id, tier, confidence, ...)
+episode_related(episode_id, related_episode_id, suppression_reason)
+
+-- Stage C
+signal_snapshot (
+  episode_id, episode_version, signal_set_version   PK composite
+  as_of_ts
+  values              jsonb   -- NAMED keys, never a positional array
+  peer_level_used, peer_population_n
+  missing             jsonb   -- which signals were unavailable and why
+  recorded_at
+)
+
+-- Stage D
+score_result (
+  episode_id, episode_version, scoring_version      PK composite
+  rule_score, rule_components jsonb
+  if_score, if_percentile, if_model_version         -- null when flag off
+  final_score, evidence_band
+  degraded boolean, degraded_reason
+  signal_set_version, signal_snapshot_ref
+  scored_at, as_of_ts
+)
+
+-- Stage E. The ONLY mutable table. Rebuildable from score_result at any time.
+queue_projection (
+  episode_id          PK
+  episode_version, lineage_root_id
+  bucket, urgency_band, evidence_band
+  deadline, deadline_source enum EXPLICIT|DERIVED|ABSENT, deadline_member_id
+  sort_key            -- materialised composite, see §8.3
+  override_rule_id, override_reason
+  promoted boolean, promotion_held_reason
+  review_status
+  updated_at
+)
+INDEX (bucket, sort_key), (review_status)
+
+-- Stage F
+evidence_pack (episode_id, episode_version, pack_version, content jsonb,
+                tool_trace jsonb, built_at)
+narrative     (episode_id, episode_version, narrative_version,
+                agent_model_version, prompt_version, text,
+                source_pack_ref, validation_result jsonb, generated_at)
+agent_trace   (trace_id PK, episode_id, agent_name, tool_calls jsonb,
+                tokens_in, tokens_out, latency_ms, outcome, recorded_at)
+
+-- Stage H
+review_outcome (
+  episode_id, episode_version
+  disposition enum SIGNOFF|RFI|MOVE|NONE
+  grouping_feedback enum ACCEPT|SHOULD_SPLIT|SHOULD_MERGE
+  explanation_useful boolean
+  priority_feedback enum TOO_HIGH|RIGHT|TOO_LOW
+  supervisor_id, notes, decided_at
+  displayed_narrative_ref, displayed_score_ref   -- what they actually saw
+)
+```
+
+`displayed_narrative_ref` and `displayed_score_ref` are mandatory. In an audit
+the question is not what the system would produce today — it is what the
+supervisor was shown at the moment they decided.
+
+---
+
+# 5. STAGE A — INGEST AND NORMALISE
+
+## 5.1 Responsibilities
+
+1. Consume the CAL CDC feed. **Read-only. No write path to CAL may exist in the
+   codebase.** Enforce with a lint rule or a repository-layer guard, not a
+   convention.
+2. Map to `alert_fact`.
+3. Identifier hygiene.
+4. Time normalisation.
+5. Validate; route failures to DLQ.
+
+## 5.2 Identifier hygiene
+
+Before any identifier becomes a match key, test against a **versioned
+blocklist**: empty string, `N/A`, `NA`, `UNKNOWN`, `NULL`, `NONE`, whitespace
+only, all-zeros, all-nines, house/internal counterparty codes, `MISC`, `OTHER`,
+shared suspense books. Record every hit in `blocklist_hits`.
+
+This single control prevents more grouping-explosion incidents than every
+threshold combined. Treat the blocklist as living configuration with a named
+owner.
+
+**Identifier trust registry**, keyed `(source_system, identifier_name)`, carrying
+a trust level that can downgrade a strong identifier to corroborative evidence
+for that source. Without it, one bad upstream feed silently poisons
+high-confidence linking and you learn about it from a supervisor complaint
+rather than a metric.
+
+## 5.3 Time normalisation
+
+- All timestamps to UTC, originating timezone retained in a sibling column
+- **Business date from the firm calendar, not from the timestamp's date.** A
+  Tokyo booking at 23:50 UTC and a London booking at 00:10 UTC may or may not be
+  the same business day, and business date is a linking key.
+- Reject timestamps outside a configured plausible range rather than storing them
+
+## 5.4 Error taxonomy
+
+| Class | Example | Handling |
+|---|---|---|
+| `SCHEMA_INVALID` | missing required field | DLQ, ops exception |
+| `IDENTIFIER_DEGENERATE` | all identifiers blocklisted | ingest, flag, alert is linkable only by weak evidence |
+| `TIMESTAMP_IMPLAUSIBLE` | event_ts in 2087 | DLQ, ops exception |
+| `UNKNOWN_ALERT_TYPE` | not CANCEL/AMEND/LATE | DLQ, ops exception |
+| `DUPLICATE` | same alert_id already present | idempotent no-op, counter increment |
+
+Never default a missing identifier to a placeholder. That is how degenerate keys
+are born.
+
+## 5.5 Idempotency
+
+Key: `(alert_id, source_ruleset_version)`. Replay commits nothing new.
+
+---
+
+# 6. STAGE B — EPISODE LINKING (contract only)
+
+**Already built. Do not modify.** Consume the sealed payload.
+
+```
+episode_id              stable per identity
+lineage_root_id         stable across merges — USE THIS for history
+episode_version         monotonic
+supersedes[]            predecessor episode_ids
+continuation_of         prior episode_id if formed after seal or freeze
+status                  PROVISIONAL | STABLE | FROZEN
+as_of_ts                authoritative data cutoff — never wall clock
+ruleset_version, blocklist_version
+
+members[]               PRE-ORDERED by (event_ts, booking_ts, alert_id) ASC
+                        full alert_fact projection per member
+
+structural_facts        computed by linking — NEVER re-derive downstream
+  type_signature        multiset, e.g. {CANCEL:1, LATE:1}
+  size, span_seconds
+  s_edge_count, m_edge_count, max_tier, min_edge_confidence
+  relationship_density
+  flags[]               OVERSIZED | CAP_APPLIED | HUB_DEMOTED |
+                        BRIDGE_SPLIT | DEGENERATE_KEY_SEEN
+
+related_episodes[]      cross-references from suppressed merges, with reasons
+edges[]                 rule_ids, tiers, confidences — for linkage rationale
+entitlement_class       most restrictive across members
+```
+
+**Properties you may rely on:**
+- Any episode of size ≥ 3 contains at least one deterministic identifier match.
+  Medium-evidence-only episodes cap at size 2.
+- `PROVISIONAL` episodes may still change composition.
+- `member_ordering_key` is `(event_ts, booking_ts, alert_id)` ascending. Signal
+  store, UI and narrative must all use it so "first" and "last" agree.
+
+**Rules you inherit:**
+- `lineage_root_id`, never `episode_id`, for recurrence — counting `episode_id`s
+  double-counts merged predecessors
+- `as_of_ts` is the cutoff for every computed signal; wall clock leaks
+  look-ahead and invalidates replay
+
+---
+
+# 7. STAGE C — SIGNAL STORE
+
+Precomputed comparative aggregates. **Not a general feature platform.** Its only
+job is to answer cheaply and exactly the questions that make an episode look
+unusual.
+
+## 7.1 Point-in-time correctness
+
+Every aggregate honours the episode's `as_of_ts`:
+
+```
+WHERE recorded_at <= :as_of_ts
+```
+
+This is the single most common source of a system that validates beautifully and
+fails in production. Enforce with a property test (§13.2), not discipline.
+
+## 7.2 Signal catalogue
+
+### Trader baselines — window `signal.trader_baseline_window_days`
+```
+notional_p50, notional_p95, notional_current_percentile
+lateness_p50, lateness_p95, lateness_current_z     (window: lateness window)
+alert_count_30d, alert_count_90d          by alert_type and total
+amend_rate, cancel_rate, economic_amend_share
+tenure_days
+```
+
+### Peer comparison
+```
+peer_key = (desk, asset_class, seniority_band)
+if population < signal.peer_min_population:
+    fall back desk → business_line → firm
+ALWAYS record peer_level_used and peer_population_n
+```
+
+Recording the level is not optional. The narrative must state the actual
+comparison population — "compared to your desk (n=47)" and "compared to the firm
+(n=12,400)" are materially different claims, and a supervisor challenged in an
+audit needs to know which they were shown.
+
+### Episode signals
+```
+type_signature                    copied from structural_facts, NOT recomputed
+signature_recurrence_30d / _90d   same trader, same signature, BY lineage_root_id
+opening_notional, closing_notional  first/last member under member_ordering_key
+net_notional_delta_pct, direction_flipped, net_materiality
+single_counterparty, single_product
+days_to_period_end, is_month_end, is_quarter_end
+crosses_valuation_cutoff
+```
+
+### Per-type signals
+```
+CANCEL:  time_to_cancel_sec, was_rebooked, rebook_price_delta_bps,
+         rebook_notional_delta_pct, post_valuation_cutoff,
+         cancel_reason_rarity
+AMEND:   amend_sequence_no, is_economic_amend (economic field set is CONFIG —
+         it is a compliance-visible definition and it will change),
+         notional_delta_pct, price_delta_bps, counterparty_changed,
+         book_changed, direction_changed, time_to_amend_sec, favourability
+LATE:    lateness_minutes, lateness_z_vs_trader_baseline (more informative than
+         absolute), booked_outside_hours, spans_valuation_cutoff,
+         lateness_pctl_desk
+```
+
+### Series signals
+```
+rolling z-score of daily alert counts per (trader_id, alert_type)
+                                     and (desk, alert_type)
+window: signal.series_zscore_window_days
+insufficient history → null + insufficient_history marker, NEVER imputed
+```
+
+## 7.3 Missingness
+
+A missing input produces an **explicit null plus a `missing` entry naming the
+reason**, never a silent zero. Zero and unknown are different facts and every
+downstream consumer — including the Analyst agent — must be able to tell them
+apart.
+
+## 7.4 Efficiency
+
+- Cache per-alert signals by `(alert_id, signal_set_version)`. Episodes
+  re-version frequently; their members' per-alert signals do not change.
+- **Batch rolling-window aggregates.** One query per episode is the dominant
+  cost and the thing that will fall over at volume. Compute trader and peer
+  baselines on a schedule into a materialised table; look them up at episode
+  time.
+- Recompute from scratch only on `signal_set_version` change.
+- Target: p95 ≤ 2s per episode version.
+
+---
+
+# 8. STAGE D — SCORE
+
+## 8.1 Rule baseline — mandatory, always runs
+
+Policy-defined severity from configured rules. Fully explainable by
+construction. Config-driven weights over named components:
+
+```
+economic_amend_weight        × is_economic_amend
+lateness_band_weight         × lateness_z bucket
+cancel_after_cutoff_weight   × post_valuation_cutoff
+recurrence_weight            × signature_recurrence_30d threshold
+materiality_weight           × notional_current_percentile band
+episode_complexity_weight    × size, span
+```
+
+Emit `rule_components` as a named breakdown, not just a total. This *is* the
+explanation in rule-only mode.
+
+## 8.2 Isolation Forest — optional, flag-gated
+
+`scoring.isolation_forest.enabled`. When false, no ML code path executes, no
+artifact loads, and the system has no ML dependency at all. Verify with a test
+that boots the app with the flag off and asserts the ML module is never imported.
+
+When enabled:
+
+- **Training is offline, scheduled, governed. Inference never fits anything.**
+  If any inference path calls `.fit()`, the design is wrong — it produces
+  non-deterministic scores, unbounded latency, and an unauditable model.
+- Hash-pinned artifact verified at load; **refuse to start on mismatch**
+- `signal_set_version` on the artifact must match the incoming snapshot;
+  mismatch is a **hard failure**, not a warning — scoring a v4 snapshot with a
+  v3 model produces a number that looks fine and means nothing
+- Pinned `random_state`; pinned thread count where tree ordering is
+  thread-dependent
+- Subsample via `max_samples` — documented-correct behaviour, not a shortcut
+- Vectorised batch scoring, never row-by-row
+- Persisted scaler applied at inference, **never refit**
+- TreeSHAP for explanations — exact, not approximated
+- Percentile against a **frozen reference window**, refreshed only on the
+  governance cadence. A rolling window makes scores incomparable across time and
+  silently breaks every trend report.
+
+## 8.3 Combination
+
+Configured rule, not a learned ensemble:
+
+```
+final_score = rule_baseline × scoring.rule_baseline.weight
+            + if_percentile × scoring.isolation_forest.weight   (when enabled)
+renormalise weights when IF is disabled or unavailable
+```
+
+## 8.4 Numerical hygiene
+
+- Validate the signal snapshot at the model boundary: no NaN, no inf, all
+  required signals present per schema, all within configured plausible ranges
+- Clip to configured bounds and **record every clip** — a silently clipped input
+  produces a silently wrong explanation
+- Reject to a scoring DLQ on schema violation. Do not coerce.
+
+## 8.5 Degradation ladder
+
+```
+IF unavailable / times out  → rule baseline alone, degraded=true,
+                              degraded_reason recorded
+Signal snapshot incomplete  → score from available signals, mark which were
+                              missing, degraded=true
+Scoring stage down entirely → queue renders with SLA-only ordering
+```
+
+**Non-negotiable:**
+- A degraded score is never rendered as a normal score. Visible badge in queue
+  row and detail view.
+- A degraded episode ranks **no worse than median priority**. A scoring failure
+  must never bury an episode.
+- Degradation raises an ops alert and is a tracked KPI.
+- Ingestion and linking never block on scoring failure.
+
+---
+
+# 9. STAGE E — PRIORITISATION
+
+## 9.1 Bands
+
+```
+Urgency (time to deadline, business days):
+  OVERDUE   < 0
+  CRITICAL  <= priority.urgency.critical_business_days
+  NEAR      <= priority.urgency.near_business_days
+  STANDARD  greater
+  UNDATED   no deadline resolved
+
+Evidence (final_score percentile):
+  HIGH      >= priority.evidence.high_percentile
+  ELEVATED  >= priority.evidence.elevated_percentile
+  NORMAL    below
+```
+
+## 9.2 Buckets
+
+| Bucket | Condition |
+|---|---|
+| B0 | any override fires (§9.4) |
+| B1 | urgency OVERDUE or CRITICAL |
+| B2 | evidence HIGH, urgency NEAR or STANDARD |
+| B3 | evidence ELEVATED |
+| B4 | evidence NORMAL, urgency STANDARD |
+
+B0–B2 are the prioritised set; B3–B4 are not.
+
+## 9.3 Sort key — strict total order
+
+```
+1. bucket ordinal
+2. urgency band ordinal
+3. final_score                DESC
+4. max member alert score     DESC
+5. episode size               DESC
+6. earliest member alert_ts   ASC    (anti-starvation)
+7. episode_id                 ASC    (deterministic tiebreak)
+```
+
+**Step 7 is not cosmetic.** Without a total order, paginated queues duplicate and
+skip rows between page loads. Supervisors experience that as the system losing
+their work, and it is the fastest way to lose adoption.
+
+Materialise the composite into `queue_projection.sort_key` so pagination is a
+single indexed range scan, not a sort at read time.
+
+**Anti-starvation:** unreviewed beyond `priority.starvation_escalate_days`
+escalates one urgency band regardless of evidence.
+
+## 9.4 Overrides
+
+Policy, not statistics. Deterministic config, evaluated outside any model, not
+suppressible by a low score:
+
+- any member alert has an open RFI
+- trader / book / counterparty on a watchlist or under investigation
+- episode crosses a regulatory reporting deadline or period-end valuation cutoff
+- notional above firm materiality `[UNKNOWN #2]`
+- repeat pattern: same trader, same `type_signature`, ≥ N in trailing 30d,
+  **by `lineage_root_id`**
+- manual supervisor pin
+
+All force B0. The firing rule is always displayed as the placement reason.
+
+**Bound them.** Alarm when B0 exceeds `priority.b0_share_alarm_pct`. An override
+firing on a third of the queue has silently disabled prioritisation entirely, and
+nothing else in the system will tell you.
+
+## 9.5 Deadlines
+
+**Episode deadline = earliest member deadline, always.** Store and display
+`deadline_member_id`.
+
+Resolution order:
+1. **Explicit** from the alert → `deadline_source = EXPLICIT`
+2. **Derive**: `event_ts + policy SLA for alert_type` `[UNKNOWN #1]` →
+   `DERIVED`
+3. **Default**: `alert_ts + priority.default_deadline_business_days` →
+   `ABSENT`, band `UNDATED`, sorted at the **top** of STANDARD, never the bottom
+4. Emit a data-quality exception; track undated rate as a KPI
+
+Never treat an absent deadline as infinite. Never let missing data bury an
+episode. `ABSENT` is a defect to drive to zero, not a steady state.
+
+## 9.6 Promotion
+
+Score every version immediately — nothing invisible. But **hold promotion into
+the ranked queue until `status = STABLE`**, unless urgency reaches
+`queue.promote_provisional_when_urgency_at`.
+
+Reason: scoring a `PROVISIONAL` episode means its score moves under the
+supervisor as members join, and on merge the row vanishes and a different
+`episode_id` replaces it. Record `promotion_held_reason` so the state is
+explicable.
+
+---
+
+# 10. STAGE F — AGENT LAYER
+
+The part most likely to be built wrong. Read this section fully before writing
+any of it.
+
+## 10.1 Hard architectural constraints
+
+1. **No write tools. Anywhere. At all.** Not "restricted write tools." None.
+   This is the structural mitigation for prompt injection (§10.6) and the reason
+   the constraint is architectural rather than a preference.
+2. **No agent produces a number.** Every statistic comes from a tool result.
+3. **Tools return computed answers, never raw row sets.**
+   `get_trader_baseline` returns p50, p95 and the current percentile. It does
+   not return 500 trades for the model to eyeball. An LLM shown raw history will
+   approximate a percentile badly and confidently.
+4. **Every factual claim must trace to a tool result**, validated
+   programmatically before display — not by instructing the model to be careful.
+5. Pinned `agent.model_version` and `prompt_version`, `temperature = 0`.
+6. Full tool-call trace persisted as the audit artifact.
+7. **The queue renders and ranks correctly with the layer switched off.** Assert
+   this in an integration test.
+
+## 10.2 Tool surface — read-only, typed
+
+```
+get_episode(episode_id)
+  → sealed payload: members, structural_facts, edges, related_episodes
+
+get_trader_baseline(trader_id, metric, as_of_ts)
+  → { p50, p95, current_value, current_percentile, window_days, n }
+
+get_peer_comparison(episode_id, metric)
+  → { peer_level_used, peer_population_n, peer_p50, peer_p95,
+      current_percentile }
+
+get_recurrence(lineage_root_id, type_signature, window_days)
+  → { count, prior_episode_refs[] }
+
+get_related_episodes(episode_id)
+  → [{ related_episode_id, suppression_reason, shared_attributes }]
+
+get_free_text(episode_id)
+  → [{ source, field, content, UNTRUSTED: true }]     -- see §10.6
+
+get_prior_outcomes(trader_id, window_days)
+  → [{ disposition, decided_at, episode_ref }]
+
+get_score_breakdown(episode_id, episode_version)
+  → { rule_components{}, if_percentile?, shap_top_k?, degraded, degraded_reason }
+```
+
+Every tool:
+- takes `as_of_ts` or derives it from the episode; never uses wall clock
+- enforces the caller's entitlement, independently of the agent
+- returns bounded output — configured max array lengths
+- times out at `agent.tool_timeout_ms`
+- is logged into `agent_trace.tool_calls` with arguments and results
+
+## 10.3 The four agents
+
+### Case builder
+Input: `episode_id`. Calls retrieval tools to assemble a verified
+`evidence_pack`. Output is **structured data, not prose**. Deterministic tool
+sequence where possible — this agent is closer to an orchestrator than a
+reasoner, and if your framework allows it as plain code with no LLM call, prefer
+that.
+
+### Analyst
+Input: `evidence_pack`. Output: business narrative plus a "why this is unusual"
+write-up. Reads free text — cancel reason comments, trader annotations, prior
+case notes — which nothing in the spine can interpret. **This is the strongest
+justification for the entire layer.**
+
+**Explains the score. Never produces or adjusts it.** If the narrative implies a
+different priority than the queue shows, that is a bug in the narrative.
+
+### Review assistant
+Interactive during supervisor review. "Has this trader done this before?" → tool
+call → grounded answer with trace attached. Multi-turn, but every turn
+re-validated.
+
+### Drafting
+RFI and note drafts. The supervisor edits and sends. **The agent never sends.**
+
+## 10.4 Output validation — mandatory, programmatic
+
+Before any agent output reaches a screen:
+
+```
+1. Extract every numeric literal, date, identifier and named entity from output
+2. Assert each appears in the tool trace for that episode
+3. On any unsourced value:
+     agent.validation.reject_on_unsourced_number = true → reject, retry once,
+       then fall back to templated output
+     false → flag inline in the UI
+4. Persist validation_result on the narrative row regardless of outcome
+```
+
+A narrative that cannot be reconstructed from its stored pack and trace is not
+auditable and must not ship.
+
+## 10.5 Determinism and cost
+
+- `temperature = 0`, pinned model version. Narratives remain non-reproducible in
+  principle; **this is accepted because they are stored as artifacts of record,
+  not regenerated.** Never claim a narrative can be regenerated.
+- Budget: `agent.max_tool_calls_per_episode`, `agent.total_budget_ms`. Exceeding
+  either aborts to templated output.
+- Cache narratives by `(episode_id, episode_version, prompt_version,
+  agent_model_version)`. Do not regenerate on every queue read.
+- Generate lazily on episode open, not eagerly for the whole queue, unless
+  measured demand justifies it.
+
+## 10.6 Prompt injection — treat free text as hostile
+
+Trader comments and counterparty-supplied fields are **untrusted input reaching
+an instruction-following system**.
+
+```
+Controls, in order of strength:
+1. NO WRITE TOOLS ANYWHERE — structural, cannot be defeated by clever text
+2. Hard delimiting with explicit untrusted marking in the prompt
+3. Output validation (§10.4) — an injected claim has no supporting tool result
+4. Entitlement enforced in the tool layer, not the prompt
+5. Trace review sampling
+```
+
+Do not rely on prompt instructions alone. An instruction telling the model to
+ignore instructions in the data is the weakest control on this list.
+
+## 10.7 Degradation
+
+Agent layer unavailable, over budget, or failing validation → fall back to:
+- templated linkage rationale (from `edges[]`)
+- `rule_components` breakdown as the score explanation
+- no narrative, with a visible "narrative unavailable" state
+
+The supervisor's workflow continues unimpaired. Never block review on an agent.
+
+---
+
+# 11. STAGE G — SUPERVISOR UI
+
+## 11.1 Four visual registers, consistently applied
+
+| Register | Content | Treatment |
+|---|---|---|
+| SCP fact | original alert attributes | primary, unmarked |
+| Inferred relationship | grouping, edges, confidence | distinct border/background, confidence shown |
+| Model output | score, band, SHAP | distinct, with degraded badge when applicable |
+| Generated narrative | Analyst output | visibly labelled as generated |
+
+A supervisor must be able to tell at a glance which of the four they are reading.
+This is a regulatory expectation, not a design preference.
+
+## 11.2 Queue row
+
+Episode ID, deadline with `deadline_source` indicator, score with band, highest
+member alert score, alert count, `type_signature`, review status, badges:
+`PROVISIONAL`, `DEGRADED`, `OVERSIZED`, `OVERRIDE`.
+
+## 11.3 Detail view
+
+Linked alerts in `member_ordering_key` order, episode timeline, trade context,
+**linkage rationale with grouping certainty (`max_tier`,
+`min_edge_confidence`)**, score breakdown, narrative, cross-references with
+suppression reasons, actions.
+
+Alert search by Alert ID navigates to the parent episode.
+
+## 11.4 Actions
+
+`Sign-off`, `Raise RFI`, `Add note`, `Move` — all executed by the supervisor
+through the existing SCP workflow. The system executes none of them.
+
+---
+
+# 12. STAGE H — FEEDBACK
+
+## 12.1 Why disposition alone is a bad label
+
+Sign-off does not mean "not anomalous" — it may mean a false negative was never
+investigated. Training on disposition teaches the system to reproduce existing
+supervisor behaviour including its blind spots.
+
+Capture three structured signals at review time:
+1. **Grouping correct?** accept / should split / should merge with X
+2. **Explanation useful?** yes / no
+3. **Priority right?** too high / right / too low
+
+Signal 1 is the highest-value label in the system because it supervises the
+deterministic linking layer, which can be corrected precisely. Route grouping
+corrections to **threshold review, not to a model.**
+
+## 12.2 Control sample
+
+Non-prioritised episodes are never reviewed, so they never generate labels, so
+the system's view of them is never challenged. Left alone the loop confirms its
+own priors indefinitely.
+
+Route 2–5% of B3/B4 episodes for review each period, randomly selected. **This is
+the only mechanism that produces a false-negative estimate.** Budget supervisor
+capacity explicitly `[UNKNOWN #5]` — it will be the first thing cut under
+pressure, and cutting it blinds the entire governance programme.
+
+## 12.3 Governed change
+
+- Rule weight changes: config change, replayed against history, approved,
+  versioned
+- IF retraining (if enabled): fixed cadence, champion/challenger shadow run,
+  promotion criteria agreed in advance, model risk sign-off, new version with an
+  effective-from date
+- **Historical scores are never recomputed.**
+
+---
+
+# 13. CROSS-CUTTING
+
+## 13.1 Configuration
+
+- Every threshold, weight, tolerance, window and cap injected
+- **No numeric literals in logic**
+- Startup validation: fail loudly, refuse to start on missing config
+- Config versioned; version stamped on every artifact it influenced
+- Config changes are auditable events
+
+## 13.2 Idempotency and replay
+
+```
+Stage keys:
+  ingest      (alert_id, source_ruleset_version)
+  signals     (episode_id, episode_version, signal_set_version)
+  scoring     (episode_id, episode_version, scoring_version)
+  narrative   (episode_id, episode_version, prompt_version, agent_model_version)
+```
+
+Replay produces identical output and commits nothing new.
+
+**Build the replay harness as a deliverable, not deferred tooling.** It runs any
+config version over any historical range, produces a diff report against the
+incumbent, and persists the run as an evidence pack attached to the proposed
+version. It is how thresholds get approved and how "why this value?" gets
+answered in a governance forum.
+
+## 13.3 Entitlements
+
+Episode inherits its **most restrictive** member's entitlement. Grouping must
+never become a mechanism to see an alert a supervisor is not entitled to.
+
+Enforced in the data access layer, independently in the tool layer, never in a
+prompt.
+
+Episode spanning an entitlement boundary: redact non-entitled members, and
+**record that the displayed evidence is partial** — the score was computed over
+the full set and the supervisor sees a subset of its basis. Policy is
+`[UNKNOWN #4]`; flag and stop.
+
+## 13.4 Kill switch
+
+One feature flag degrades the UI to a plain alert list. **Exercise it in
+production readiness testing.** If it has never been pulled, you do not know it
+works.
+
+Separately: `scoring.isolation_forest.enabled = false` and an agent-layer
+disable flag must each be independently exercisable.
+
+## 13.5 Observability
+
+```
+Ingest    volume, DLQ rate by error class, blocklist hit rate per identifier
+          per source system, identifier fill rate
+Linking   tier mix over time, singleton rate, cap breaches, hub demotions
+          (alarm on tier-mix AND singleton-rate shift together — that pair is
+          the earliest warning that the CAL feed changed underneath you)
+Signals   latency, missingness rate per signal, peer fallback rate
+Scoring   latency, degraded rate, score distribution drift, clip rate
+Queue     bucket distribution, B0 share, undated rate, starvation escalations
+Agents    tool-call failure rate, validation rejection rate, budget-abort rate,
+          latency p50/p95, tokens and cost per episode
+Business  reconstruction time saved per review — the PRIMARY KPI. Baseline it
+          BEFORE go-live or the project cannot be proven to have worked.
+          Also: precision@k, % reviewed before deadline, grouping-correction rate
+```
+
+## 13.6 Latency budgets
+
+```
+CAL alert → episode in queue, p95            <= 90s
+Signal computation per episode version, p95  <= 2s
+Scoring per episode version, p95             <= 1s
+Queue read (paginated), p95                  <= 500ms
+Narrative generation on episode open, p95    <= 15s (async, with a loading state)
+```
+
+Narrative generation is user-facing and asynchronous. Render the deterministic
+detail view immediately; stream or poll the narrative in.
+
+---
+
+# 14. TESTING
+
+## 14.1 Property tests
+
+These will not be caught by example-based tests and are the ones that matter.
+
+```
+Determinism         same inputs + versions → byte-identical signals, scores,
+                    sort order. Shuffle input order N times.
+Idempotence         reprocess → zero new rows
+Point-in-time       no signal reads data with recorded_at > as_of_ts
+                    (instrument the query layer; do not test by inspection)
+Version guard       mismatched signal_set_version vs model artifact is rejected,
+                    not scored
+Sort totality       no two distinct episodes produce an equal sort key
+Pagination          concatenating all pages yields every episode exactly once,
+                    under concurrent writes
+Agent groundedness  every numeric literal in a narrative appears in its trace
+Spine independence  agent layer disabled → queue identical, ranking identical
+IF independence     scoring.isolation_forest.enabled=false → ML module never
+                    imported
+```
+
+## 14.2 Golden set
+
+Five business archetypes with expected signals, scores, bands and explanations,
+run on every release:
+
+1. Cancel and rebook (CANCEL + LATE)
+2. Cancel and correct (CANCEL + AMEND)
+3. Late then corrected (LATE + AMEND)
+4. Serial amendment (AMEND × n)
+5. Standalone (single alert, episode of size 1 — **not a special case**)
+
+## 14.3 Adversarial
+
+NaN and inf signals, empty peer group, all-zeros identifiers, 500-member
+episode, entitlement-split episode, signal-version skew, duplicate delivery,
+clock skew, agent timeout mid-generation, injected instruction in free text,
+missing deadline on every member, IF artifact hash mismatch at boot.
+
+## 14.4 Agent-specific
+
+- Injection corpus: free-text fixtures containing instruction-shaped content;
+  assert no tool call outside the read-only set, assert validation catches
+  injected claims
+- Groundedness regression: fixed evidence packs, assert narratives contain no
+  unsourced figures across N generations
+- Budget: assert abort-to-template at the configured ceiling
+
+---
+
+# 15. BUILD ORDER
+
+Do not parallelise across phases.
+
+```
+Phase 0   Ingest, normalise, [linking already built], signal store,
+          rule-baseline score, deterministic queue, UI.
+          Replay harness. Kill switch, exercised.
+          NO ML. NO AGENTS.
+          Shadow-run alongside the current process and MEASURE reconstruction
+          time saved.
+
+          This phase alone addresses the stated business problem and carries
+          almost no model risk. Do not skip it to reach the agents faster.
+
+Phase 1   Case builder and Analyst. Evidence pack, tool layer, narrative,
+          output validation, trace persistence. Read-only throughout.
+          Gated on UNKNOWN #7.
+
+Phase 2   Review assistant and Drafting. Free-text ingestion with the full
+          injection control set. Structured feedback capture. Control sample.
+
+Phase 3   Isolation Forest behind the flag, with TreeSHAP. Admitted only on
+          demonstrated lift over the rule baseline on a held-out labelled set,
+          and only with model risk approval. Gated on UNKNOWN #6.
+```
+
+---
+
+# 16. PROHIBITIONS
+
+- Never write to SCP or the CAL alert store, by any path.
+- Never give any agent a write tool.
+- Never let an agent compute a number. Numbers come from tools.
+- Never return raw row sets to an agent where a computed statistic will do.
+- Never display an agent claim that does not trace to a tool result.
+- Never rely on prompt instructions as an injection control.
+- Never call `.fit()` in an inference path.
+- Never refit a scaler at inference.
+- Never use wall clock where `as_of_ts` is specified.
+- Never count `episode_id` for history. Use `lineage_root_id`.
+- Never re-derive a fact that linking already emitted in `structural_facts`.
+- Never make the agent layer a dependency of the queue.
+- Never render a degraded, partial or inferred result as a normal one.
+- Never let missing data bury an episode.
+- Never recompute a historical score or narrative with a newer version.
+- Never invent a threshold. Read from config; fail loudly if absent.
+- Never resolve ambiguity silently. Stop and ask.
