@@ -1,0 +1,49 @@
+# ASAS versioned decision config. Every threshold, tolerance, window, weight and limit lives here.
+# Decimals are strings to avoid float drift. Missing decision keys fail safe to individual review.
+version = "asas-config-1"
+
+[agents]
+enabled = false
+model_id = "unset"
+prompt_version = "narrator-1"
+# Tokens containing digits that agent prose may use verbatim (e.g. "T+1").
+digit_whitelist = []
+
+[linking]
+window_hours = 72
+
+[categories.by_alert_type]
+PRICE_OFF_MARKET = "PRICE_CORRECTION"
+CANCEL_AMEND_PATTERN = "CANCEL_REBOOK"
+LATE_TRADE = "LATE_BOOKING"
+
+[claims]
+PRICE_CORRECTION = ["PRICE_CORRECTION"]
+CANCEL_REBOOK = ["CANCEL_REBOOK"]
+LATE_BOOKING = ["LATE_BOOKING"]
+
+[verification]
+price_correction_max_rel_change = "0.05"
+rebook_window_hours = 24
+rebook_quantity_rel_tolerance = "0"
+
+[evidence.required]
+PRICE_CORRECTION = ["TRADE_LIFECYCLE_VALID", "ALL_CLAIMS_VERIFIED", "EXPLANATION_PRESENT"]
+CANCEL_REBOOK = ["TRADE_LIFECYCLE_VALID", "ALL_CLAIMS_VERIFIED", "EXPLANATION_PRESENT"]
+LATE_BOOKING = ["TRADE_LIFECYCLE_VALID", "ALL_CLAIMS_VERIFIED", "EXPLANATION_PRESENT"]
+
+[history]
+lookback_days = 365
+min_comparable = 5
+adverse_outcomes = ["ESCALATED", "BREACH_CONFIRMED"]
+adverse_rate_threshold = "0.2"
+
+[priority.weights]
+alert_count = "1"
+notional = "0.000001"
+contradicted_claims = "10"
+not_verifiable_claims = "3"
+
+[cohorts]
+min_size = 2
+max_size = 50
