@@ -1,0 +1,943 @@
+# BUILD PROMPT — SCP Episode Intelligence Layer
+### Full-architecture implementation brief for a coding agent
+
+> **How to use this file.** Place it at the repo root as `COPILOT.md` (or
+> `.github/copilot-instructions.md`, or `CLAUDE.md` — whichever your agent
+> reads). It is long by design. Do not paste it as a single chat turn; let the
+> agent read it as a file and point it at a numbered section per task.
+>
+> **Before first use, fill every `[FILL]` marker in Section 1.** An agent that
+> guesses your stack will produce code you throw away.
+
+---
+
+# 0. READ THIS FIRST
+
+You are implementing a **post-detection decision-support layer** for trade
+surveillance at a regulated financial institution. The output of this system is
+evidence presented to a human supervisor who carries personal regulatory
+accountability for the decision they make. That single fact drives every
+constraint below.
+
+Three consequences you must internalise before writing any code:
+
+1. **A wrong answer that looks confident is worse than no answer.** Degraded,
+   partial and uncertain states must be visibly degraded, partial and uncertain
+   all the way to the screen. Never fill a gap with a plausible default.
+2. **Everything is evidence in a future audit.** A decision made today may be
+   examined in seven years. The system must be able to reproduce exactly what
+   was shown, computed from what inputs, by which model version — not an
+   approximation of it.
+3. **Conservative constraints in this document are load-bearing.** Several will
+   look unnecessarily restrictive. They exist because a single incorrect
+   grouping presented to a supervisor destroys trust in the layer permanently.
+   Do not relax one because it is inconvenient.
+
+**Your behavioural rules for this project:**
+
+- Do not resolve ambiguity silently. Stop and ask.
+- Do not invent numeric values. See Section 2.
+- Do not renegotiate anything marked SETTLED. If you disagree, implement it and
+  record the disagreement in one clearly labelled note. Do not build around it.
+- Implement one section per task. Do not scaffold the whole system in one pass.
+- Do not write to the CAL alert store under any circumstance, via any path.
+
+---
+
+# 1. TARGET ENVIRONMENT — FILL BEFORE USE
+
+```
+Language / runtime:        [FILL]
+Framework:                 [FILL]
+Persistence:               [FILL]
+Streaming / CDC transport: [FILL]
+ML runtime:                [FILL]
+Artifact / model registry: [FILL]
+Config management:         [FILL]
+Observability stack:       [FILL]
+Test framework:            [FILL]
+Repo state:                [FILL: greenfield | existing, conventions at ...]
+Deployment target:         [FILL]
+Expected daily alert vol:  [FILL]
+Expected peak burst:       [FILL]
+```
+
+If any line is unfilled, ask before writing code. Do not assume.
+
+---
+
+# 2. SETTLED / PLACEHOLDER / UNKNOWN
+
+This section governs everything. Consult it before writing any constant.
+
+## 2.1 SETTLED — implement exactly, do not propose alternatives
+
+- Read-only relationship to SCP and the CAL alert store
+- Human-in-the-loop: no autonomous sign-off, RFI, or ownership move
+- Append-only, bitemporal persistence throughout
+- Governed retraining only; historical results never recomputed
+- Three alert types: `CANCEL`, `AMEND`, `LATE`
+- Three edge tiers S/M/W combined by noisy-OR
+- Structural gate: at least one S or M rule must fire for an edge to materialise
+- Two-pass Union-Find, pass 2 against a pass-1 snapshot
+- Type-compatibility matrix; same-type pairs are Tier S only
+- Micro-batch ticks; components rebuilt per tick, never mutated
+- Lineage root carried through supersession
+- Sealed episode payload as the Linking → FE contract
+- Episodes freeze on supervisor action; late alerts open a continuation
+- Percentile normalisation against a frozen reference window before aggregation
+- Prophet is a series-level feature producer, not an episode scorer
+- Prioritisation sort terminates in `episode_id`
+- Overrides are deterministic config outside the model
+- Two explanation artifacts: templated linkage rationale + model score rationale
+
+## 2.2 PLACEHOLDER — unvalidated, pending empirical study
+
+Read every one of these from configuration. **No numeric literal in logic, ever.**
+Fail loudly at startup if a required value is absent. Never default.
+
+```
+linking.confidence_threshold        0.75
+linking.weight.tier_s               0.98
+linking.weight.tier_m               0.65
+linking.weight.tier_w               0.30
+linking.m1.notional_tolerance_pct   1.0
+linking.m1.event_ts_tolerance_min   60
+linking.cap.episode_size            12
+linking.cap.span_business_days      5
+linking.cap.block_size              200
+linking.hub.max_non_s_edges         5
+linking.tick_seconds                45
+linking.settle_window_business_days 1
+
+scoring.evidence.high_percentile    95
+scoring.evidence.elevated_percentile 85
+scoring.reference_window_days       180
+scoring.min_models_for_consensus    2
+scoring.model_timeout_ms            2000
+
+peer.min_population                 30
+
+priority.starvation_escalate_days   10
+priority.b0_share_alarm_pct         10
+```
+
+Never derive a new constant from a placeholder. If your implementation needs a
+value not on this list, add it to config and flag it to the human.
+
+## 2.3 UNKNOWN — business/compliance input required
+
+Flag and stop if your work depends on one:
+
+- Review SLA per alert type (CANCEL, AMEND, LATE)
+- Firm materiality notional threshold
+- Retention period for models, features and explanations
+- Entitlement policy for episodes spanning permission boundaries
+- Supervisor capacity for the inlier control sample
+- Retracted-alert policy for frozen episodes
+
+---
+
+# 3. ARCHITECTURE
+
+```
+CAL Alert Store (read-only CDC)
+        │
+        ▼
+[A] INGEST & NORMALISE ──────────────────────────────► DLQ
+        │
+        ▼
+[B] EPISODE LINKING  (ALREADY IMPLEMENTED — contract only, §4)
+        │
+        │  sealed episode payload
+        ▼
+[C] FEATURE ENGINEERING ─────────────► feature_store (append-only, as_of)
+        │
+        │  feature vector + versions
+        ▼
+[D] ANOMALY SCORING ENSEMBLE ────────► model_results_store
+        │                               (per-model raw/pct/vote + consensus)
+        │
+        ├──► [D5] PROPHET SERIES LAYER (separate grain, feeds C and D)
+        │
+        ▼
+[E] CLASSIFICATION & PRIORITISATION ─► queue projection
+        │
+        ▼
+[F] EXPLAINABLE AI ──────────────────► explanation_store
+        │
+        ▼
+[G] SUPERVISOR REVIEW (UI + SCP Assistant)  — human decides
+        │
+        ▼
+[H] OUTCOMES & FEEDBACK ─────────────► review_outcomes_store
+        │
+        ▼ (governed cadence only)
+[I] RETRAINING PIPELINE ─────────────► model_registry_store
+```
+
+**Stage isolation rule.** Each stage reads only the sealed contract emitted by
+its predecessor. No stage reaches backwards past its immediate input. Feature
+Engineering never reads the edge store. Scoring never reads raw alerts. XAI
+never recomputes a feature. Violating this produces two computations of the
+same fact that drift apart, and the drift surfaces as an inexplicable score
+rather than an error.
+
+---
+
+# 4. STAGE B — EPISODE LINKING (implemented; contract only)
+
+Do not modify. Consume its output. The contract you can rely on:
+
+## 4.1 Sealed episode payload
+
+Emitted on every episode version change. Self-contained — it is the complete
+input to Feature Engineering.
+
+```
+episode_id                  stable per identity
+lineage_root_id             stable across merges; use THIS for history
+episode_version             monotonic
+supersedes[]                predecessor episode_ids
+continuation_of             prior episode_id if formed after seal/freeze
+status                      PROVISIONAL | STABLE | FROZEN
+as_of_ts                    FE's data cutoff — authoritative, not wall clock
+ruleset_version
+blocklist_version
+
+members[]                   PRE-ORDERED, ordering key declared below
+  alert_id, alert_type, event_ts, booking_ts, execution_ts
+  trade_urn, alt_trade_id, lifecycle_ref, package_id
+  trader_id, desk, book, counterparty_id, product_key, asset_class
+  notional, currency, direction, price_or_rate
+  amended_fields[]          AMEND only
+  lateness_minutes          LATE only
+  cancel_reason_code        CANCEL only
+  entitlement_class
+
+member_ordering_key         (event_ts, booking_ts, alert_id) ascending
+                            declared so FE, UI and XAI agree on "first"/"last"
+
+structural_facts            computed by Linking; FE MUST NOT re-derive
+  type_signature            multiset, e.g. {CANCEL:1, LATE:1}
+  size
+  span_seconds              first→last event_ts under member_ordering_key
+  s_edge_count
+  m_edge_count
+  max_tier                  S | M
+  min_edge_confidence
+  relationship_density      edges / max possible edges
+  flags[]                   OVERSIZED | CAP_APPLIED | HUB_DEMOTED |
+                            BRIDGE_SPLIT | DEGENERATE_KEY_SEEN
+
+related_episodes[]          RELATED_TO cross-references (suppressed merges)
+edges[]                     rule_ids, tiers, weights, confidences — for XAI only
+entitlement_class           most restrictive across members
+```
+
+## 4.2 Rules you inherit
+
+- `lineage_root_id`, never `episode_id`, for any history or recurrence lookup.
+  Counting `episode_id`s double-counts merged predecessors.
+- `as_of_ts` is the cutoff for every feature. Using wall clock silently leaks
+  look-ahead and invalidates the entire replay/tuning harness.
+- An episode of size ≥ 3 always contains at least one Tier S edge. M-only
+  episodes are capped at size 2. You may rely on this.
+- `PROVISIONAL` episodes may still change composition. Score them, but see §7.5
+  for queue promotion.
+
+---
+
+# 5. STAGE C — FEATURE ENGINEERING
+
+## 5.1 Principles
+
+- **Point-in-time correctness.** Every feature uses only data with
+  `recorded_at <= as_of_ts`. No exceptions. This is the single most common
+  source of a model that validates beautifully and fails in production.
+- **Offline/online parity.** One code path computes features for both training
+  and scoring, or you maintain a reconciliation test that fails the build on
+  divergence. Two implementations will diverge.
+- **Explicit missingness.** A missing input produces an explicit null plus an
+  imputation record, never a silent zero. Zero and "unknown" are different
+  facts and the model must be able to tell them apart.
+- **Immutable output.** Feature vectors are written once, keyed by
+  `(episode_id, episode_version, feature_set_version)`.
+
+## 5.2 Alert-level features
+
+### CANCEL
+| Feature | Definition | Notes |
+|---|---|---|
+| `time_to_cancel_sec` | `cancel_ts − booking_ts` | |
+| `cancelled_notional` | absolute | |
+| `notional_pctl_trader_12m` | percentile vs trader trailing 12m | point-in-time |
+| `was_rebooked` | rebook member present in episode | from structural facts |
+| `rebook_price_delta_bps` | signed | null if no rebook |
+| `rebook_notional_delta_pct` | signed | null if no rebook |
+| `post_valuation_cutoff` | cancel after fixing/valuation cutoff | calendar-driven |
+| `cancel_reason_rarity` | freq of reason code for trader, trailing 90d | smoothed |
+
+### AMEND
+| Feature | Definition | Notes |
+|---|---|---|
+| `amend_sequence_no` | nth amendment on this URN | |
+| `is_economic_amend` | amended fields intersect economic set | **highest-signal feature in scope** |
+| `notional_delta_pct` | signed | |
+| `price_delta_bps` | signed | |
+| `counterparty_changed` | boolean | |
+| `book_changed` | boolean | |
+| `direction_changed` | boolean | |
+| `time_to_amend_sec` | `amend_ts − booking_ts` | |
+| `favourability` | did the amendment move MTM toward the trader | requires pricing input; null if unavailable, never defaulted |
+
+The economic-field set must be **configuration**, not a hardcoded list. It will
+change and it is a compliance-visible definition.
+
+### LATE
+| Feature | Definition | Notes |
+|---|---|---|
+| `lateness_minutes` | beyond threshold | |
+| `lateness_z_vs_trader_baseline` | vs trader trailing 90d | **more informative than absolute lateness** |
+| `booked_outside_hours` | vs desk calendar | |
+| `spans_valuation_cutoff` | boolean | |
+| `lateness_pctl_desk` | percentile within desk, same period | |
+
+### Common to all types
+`trader_tenure_days`, `product_rarity_trader`, `counterparty_rarity_desk`,
+`days_to_period_end`, `is_month_end`, `is_quarter_end`,
+`alert_count_trader_30d`, `alert_count_trader_90d`
+
+## 5.3 Episode-level features
+
+**From structural facts — copy, do not recompute:**
+`type_signature` (categorical, small and enumerable in this scope — high signal
+and trivially explainable), `size`, `span_seconds`, `s_edge_count`,
+`m_edge_count`, `max_tier`, `min_edge_confidence`, `relationship_density`.
+
+Expose `max_tier` and `min_edge_confidence` to XAI. A supervisor should be able
+to see how certain the *grouping itself* is, separately from how anomalous the
+behaviour is.
+
+**Derived:**
+| Feature | Definition |
+|---|---|
+| `opening_notional` / `closing_notional` | first/last member under `member_ordering_key` |
+| `net_notional_delta_pct` | signed economic progression |
+| `direction_flipped` | boolean |
+| `net_materiality` | absolute economic effect |
+| `signature_recurrence_30d` / `_90d` | same `type_signature`, same trader, **by lineage_root_id** |
+| `single_counterparty` / `single_product` | concentration booleans |
+| `crosses_period_end` | boolean |
+| `frequency_drift_z` | joined from Prophet layer (§6.6) |
+
+## 5.4 Peer groups
+
+Every peer-relative feature and the entire LOF model depend on this. Get it
+right.
+
+```
+peer_key = (desk, asset_class, seniority_band)
+if population < peer.min_population:
+    fall back: desk → business_line → firm
+record peer_level_used and peer_population_n IN THE FEATURE VECTOR
+```
+
+Recording the level used is not optional. The explanation must state the actual
+comparison population — "compared to your desk (n=47)" and "compared to the
+firm (n=12,400)" are materially different claims, and a supervisor challenged in
+an audit needs to know which one they were shown.
+
+## 5.5 Storage
+
+```
+feature_vector
+  episode_id, episode_version, lineage_root_id
+  feature_set_version
+  as_of_ts, recorded_at
+  values          (typed, named — not a positional array)
+  imputations[]   which features were imputed and by what policy
+  peer_level_used, peer_population_n
+  PRIMARY KEY (episode_id, episode_version, feature_set_version)
+```
+
+Named rather than positional values. Positional arrays make a feature-set
+version bump a silent data-corruption event.
+
+## 5.6 Efficiency
+
+- Compute alert-level features once per alert and cache by
+  `(alert_id, feature_set_version)`. Episodes re-version frequently; their
+  members' alert-level features do not change.
+- Batch the rolling-window aggregates (trader 30d/90d counts, percentiles)
+  rather than issuing one query per episode. These are the dominant cost.
+- Maintain incremental aggregates where the window permits; recompute from
+  scratch only on feature-set version change.
+- Target: p95 feature computation ≤ 5s per episode version.
+
+---
+
+# 6. STAGE D — ANOMALY SCORING ENSEMBLE
+
+This section carries the most detail because it carries the most operational
+risk.
+
+## 6.1 Hard separation of training and inference
+
+**Training is offline, scheduled, and governed. Inference never fits anything.**
+
+If any inference code path calls `.fit()`, the design is wrong. Consequences:
+non-deterministic scores, unbounded latency, and an unauditable model. Every
+model — including scalers, encoders and the reference-window digest — is a
+persisted, hash-pinned artifact loaded at startup.
+
+## 6.2 Artifact contract
+
+```
+model_artifact
+  model_id, model_version
+  artifact_hash                 verified at load; refuse to start on mismatch
+  model_type                    baseline | isolation_forest | lof | ocsvm | ae
+  feature_set_version           must match the incoming vector, else refuse
+  training_snapshot_ref
+  hyperparameters
+  preprocessing_artifact        scaler/encoder fitted at training, NEVER refit
+  reference_window_id
+  peer_key                      for peer-partitioned models (LOF)
+  random_seed
+  effective_from, effective_to
+  approval_record
+```
+
+Feature-version mismatch between vector and artifact is a **hard failure**, not
+a warning. Scoring a v4 vector with a v3 model produces a number that looks fine
+and means nothing.
+
+## 6.3 The ensemble, by phase
+
+Phase models in. Each addition must demonstrate measured lift over the previous
+phase on a held-out labelled set before it ships.
+
+| Model | Detects | Phase | Mandatory |
+|---|---|---|---|
+| Deterministic baseline | policy-defined severity | 1 | **Yes** |
+| Isolation Forest | globally rare episodes | 1 | Yes |
+| LOF (peer-partitioned) | deviation from peer group | 1 | Yes |
+| Prophet | frequency drift over time | 2 | Feature producer |
+| One-Class SVM | outside learned boundary | 3 | On lift only |
+| Autoencoder | unseen attribute combinations | 3 | On lift only |
+
+**The baseline is not a placeholder.** It is the fallback path when models fail,
+and it is the benchmark every ML model must beat. Build it first and keep it
+forever.
+
+## 6.4 Per-model implementation requirements
+
+### Isolation Forest — primary
+- Subsample (`max_samples`) rather than fitting on the full set; complexity is
+  O(n log n) and subsampling is the documented-correct behaviour, not a
+  shortcut.
+- Pin `random_state`. Pin thread count where the implementation's tree ordering
+  is thread-dependent. Unpinned parallelism makes scores non-reproducible, which
+  breaks the audit requirement.
+- Score in vectorised batches. Never row-by-row.
+- TreeSHAP-compatible — this is why it is the primary model. Its explanations
+  are exact rather than approximated.
+
+### LOF — peer-relative
+- **Partition by peer group. Do not fit one global LOF.** A global LOF answers a
+  question nobody asked; the entire point of this model is peer relativity.
+- Fit in `novelty=True` mode so new episodes are scored against the fitted
+  neighbourhood without refitting.
+- Refuse to fit a peer partition below `peer.min_population`. Fall back up the
+  hierarchy and record it.
+- If any peer partition's reference set grows beyond roughly 50k rows, replace
+  exact kNN with an approximate index (HNSW). Record that approximation in the
+  artifact — an approximate neighbour set is a material fact about the score.
+- Cold start (new trader, new desk, thin peer group) is a **first-class path**,
+  not an exception: use the fallback level, mark `cold_start=true`, and surface
+  it in the explanation.
+
+### One-Class SVM — phase 3, conditional
+- Exact RBF OCSVM is roughly O(n²)–O(n³) to fit and does not scale here.
+- If admitted, use the SGD-based formulation with a Nystroem kernel
+  approximation, and record the approximation parameters in the artifact.
+- Expect substantial redundancy with Isolation Forest. Measure correlation of
+  percentile ranks before admitting; if r > 0.85 it adds cost and no signal.
+
+### Autoencoder — phase 3, conditional
+- With ~40 features and three alert types, the dimensionality does not obviously
+  justify it. Require an explicit go/no-go on measured lift.
+- If admitted: fixed architecture in config, pinned seed, pinned framework
+  version, reconstruction error as the score, and the input scaler persisted
+  with the model.
+- Deterministic inference mode. No dropout at scoring time.
+
+### Prophet — series layer, §6.6
+
+## 6.5 Percentile normalisation — the aggregation contract
+
+**Never average raw scores across models.** Isolation Forest, LOF and OCSVM
+produce values on incomparable scales with incomparable distributions.
+
+```
+1. Each model's raw score → percentile rank against a FROZEN reference window
+2. Reference window is an artifact: a precomputed sorted array or t-digest
+   giving O(log n) percentile lookup at inference
+3. Refresh the reference window ONLY on the governance cadence
+4. Consensus = weighted mean of percentile ranks
+5. Vote = count of models scoring above their own p95 threshold
+6. Report vote count alongside consensus — "4 of 5 models flagged this" is
+   more persuasive to a supervisor than a single opaque number
+```
+
+A rolling reference window makes scores incomparable day to day, silently breaks
+every trend report, and means a supervisor cannot compare today's 96th
+percentile to last month's. Freeze it.
+
+## 6.6 Prophet series layer
+
+**Different grain. This is not an episode scorer.** Wiring it as a peer of
+Isolation Forest is an architectural error.
+
+```
+Grain:    (trader_id, alert_type) and (desk, alert_type), daily counts
+Fit:      offline, nightly, parallel across series
+Output:   expected count + prediction interval per series per day
+Derived:  frequency_drift_z = (actual − expected) / interval_width
+Consumed: as a FEATURE by Stage C (§5.3), and as a standalone drift signal
+          that can raise priority even when every constituent alert is
+          individually unremarkable
+```
+
+Implementation notes:
+- Thousands of series × seconds per fit means the nightly job must be
+  parallelised and time-boxed. Budget it explicitly.
+- Series with insufficient history get no forecast; emit null, mark
+  `insufficient_history`, never impute a default.
+- Cache forecasts for lookup. Never fit at scoring time.
+- Holiday/calendar regressors from the firm calendar — quarter-end is the
+  seasonality that matters most here and the one Prophet exists to handle.
+
+## 6.7 Robustness — failure isolation
+
+```
+Per model:
+  hard timeout           scoring.model_timeout_ms
+  circuit breaker        open after N consecutive failures/timeouts
+  bulkhead               a failing model cannot exhaust the shared pool
+  health check at load   artifact hash, feature version, smoke-score a fixture
+
+Degradation ladder:
+  1+ models unavailable        → renormalise weights over the survivors
+                                 degraded=true, missing_models[] recorded
+  < scoring.min_models_for_consensus available
+     OR Isolation Forest down  → fall back to deterministic baseline
+  entire ML layer down         → queue renders, SLA-only ordering
+```
+
+**Non-negotiable degradation rules:**
+- A degraded score is never rendered as a normal score. Visible badge in the
+  queue row and the detail view.
+- A degraded episode ranks **no worse than median priority**. A scoring failure
+  must never bury an episode.
+- Degradation raises an ops alert and is tracked as a KPI.
+- Ingestion and linking never block on a scoring failure. Score asynchronously;
+  the queue shows "scoring in progress" if read first.
+
+## 6.8 Numerical hygiene
+
+Non-finite values reaching a model produce garbage or a crash, and both are
+worse than an explicit rejection:
+
+- Validate the feature vector at the model boundary: no NaN, no inf, all
+  features present per the feature-set schema, all within configured plausible
+  ranges.
+- Clip to configured bounds and **record every clip**. A silently clipped
+  feature is a silently wrong explanation.
+- Reject and route to a scoring DLQ on schema violation. Do not coerce.
+- Apply the persisted scaler. Never refit at inference — refitting on the
+  inference batch is a subtle and total invalidation of the model.
+
+## 6.9 Persistence
+
+```
+model_result
+  episode_id, episode_version, lineage_root_id
+  per_model[]:
+    model_id, model_version, raw_score, percentile, vote, weight,
+    reference_window_id, cold_start, approximation_used
+  consensus_percentile, vote_count
+  degraded, missing_models[]
+  feature_set_version, feature_vector_ref
+  scored_at, as_of_ts
+  APPEND ONLY — never updated, never recomputed by a later model version
+```
+
+## 6.10 Performance targets
+
+```
+Feature vector → consensus score, p95      ≤ 3s
+Batch scoring throughput                   ≥ [FILL] episodes/sec
+Model artifact load at startup             ≤ 30s, fail fast on hash mismatch
+Nightly Prophet fit across all series      ≤ [FILL] minutes, time-boxed
+```
+
+Warm models at startup. Reject traffic until health checks pass. A cold first
+request that takes 40 seconds will be read as an outage.
+
+---
+
+# 7. STAGE E — CLASSIFICATION & PRIORITISATION
+
+## 7.1 Bands
+
+```
+Urgency (time to deadline):
+  OVERDUE   < 0
+  CRITICAL  ≤ 1 business day
+  NEAR      ≤ 3 business days
+  STANDARD  > 3 business days
+  UNDATED   no deadline resolved
+
+Evidence (consensus percentile):
+  HIGH      ≥ scoring.evidence.high_percentile
+  ELEVATED  ≥ scoring.evidence.elevated_percentile
+  NORMAL    below
+```
+
+## 7.2 Buckets
+
+| Bucket | Condition | Maps to |
+|---|---|---|
+| B0 Mandatory | any override fires (§7.4) | Outlier |
+| B1 Act Now | urgency OVERDUE or CRITICAL | Outlier |
+| B2 High Evidence | evidence HIGH, urgency NEAR/STANDARD | Outlier |
+| B3 Watch | evidence ELEVATED | Inlier |
+| B4 Routine | evidence NORMAL, urgency STANDARD | Inlier |
+
+## 7.3 Sort key — strictly deterministic
+
+```
+1. bucket ordinal
+2. urgency band ordinal
+3. consensus_percentile           DESC
+4. highest member alert score     DESC
+5. episode size                   DESC
+6. earliest member alert_ts       ASC   (anti-starvation)
+7. episode_id                     ASC   (final deterministic tiebreak)
+```
+
+**Step 7 is not cosmetic.** Without a total order, paginated queues duplicate
+and skip rows between page loads. Supervisors experience that as the system
+losing their work, and it is the fastest way to lose adoption.
+
+Anti-starvation: any episode unreviewed beyond
+`priority.starvation_escalate_days` escalates one urgency band regardless of
+evidence.
+
+## 7.4 Overrides
+
+Policy, not statistics. Deterministic config, evaluated outside the model,
+cannot be suppressed by a low anomaly score:
+
+- any member alert has an open RFI
+- trader/book/counterparty on a watchlist or under investigation
+- episode crosses a regulatory reporting deadline or period-end valuation cutoff
+- notional above firm materiality threshold `[UNKNOWN]`
+- repeat pattern: same trader, same `type_signature`, ≥ N in trailing 30d
+  (**by lineage_root_id**)
+- manual supervisor pin
+
+All force B0. The firing rule is always displayed as the reason for placement.
+
+**Bound them.** Alarm if B0 exceeds `priority.b0_share_alarm_pct` of the queue.
+An override firing on a third of episodes has silently disabled prioritisation
+entirely, and nothing else in the system will tell you.
+
+## 7.5 Deadlines
+
+**Episode deadline = earliest member deadline, always. Display which member.**
+
+Missing deadline resolution, in order:
+1. **Derive**: `event_ts + policy SLA for alert_type` → `deadline_source=DERIVED`
+2. **Default**: `alert_ts + firm default` → `deadline_source=ABSENT`, band
+   `UNDATED`, sorted at the **top** of STANDARD, never the bottom
+3. **Escalate**: emit a data-quality exception; track undated rate as a KPI
+
+Never treat an absent deadline as infinite. Never let missing data bury an
+episode. `ABSENT` is a defect to drive to zero, not a steady state.
+
+## 7.6 Queue promotion and provisional episodes
+
+Featurise and score every version immediately — nothing should be invisible.
+But **hold promotion into the ranked queue until `status = STABLE`**, unless
+urgency band is OVERDUE or CRITICAL.
+
+Reason: scoring a `PROVISIONAL` episode means its score moves under the
+supervisor as members join, and on merge the row disappears and a different
+`episode_id` replaces it. That reads as instability and erodes trust. Provisional
+episodes that must be shown early carry a visible badge.
+
+---
+
+# 8. STAGE F — EXPLAINABLE AI
+
+Two artifacts, produced by different mechanisms. Do not conflate them.
+
+## 8.1 Linkage rationale — templated, never generated
+
+Rendered deterministically from `edges[]` in the sealed payload. It must be
+exactly true, therefore it must not be model-generated.
+
+> *Alert A-1041 (Cancel, trade URN 88231) and Alert A-1043 (Late, trade URN
+> 88274) are grouped because URN 88274 is recorded as the Alternate Trade ID on
+> trade 88231. Rule S2, confidence 0.98.*
+
+Also render: grouping certainty (`max_tier`, `min_edge_confidence`), any
+suppressed merges as cross-references with their suppression reason, and any
+structural flags.
+
+## 8.2 Score rationale
+
+- Top-k contributing features with direction and magnitude
+- **TreeSHAP for Isolation Forest** — exact, and the reason IF is primary
+- KernelSHAP or a documented global surrogate for LOF; **label the
+  approximation** wherever it appears
+- Explicit peer statement including level and population size:
+  *"notional at the 99th percentile of this trader's trailing 12 months; peer
+  group = FX Options desk, n = 47"*
+- Per-model votes, so agreement and disagreement are both visible
+- Degradation, cold start, imputations and clips are all disclosed
+
+## 8.3 Narrative generation / SCP Assistant
+
+The Assistant **renders** structured facts into prose. It does not compute,
+infer, or introduce facts.
+
+```
+Input:      a fixed, structured fact payload assembled by deterministic stages
+Generation: constrained to that payload
+Validation: every number in the output must appear in the payload — enforce
+            this programmatically before display, not by prompt instruction
+Storage:    the fact payload is persisted alongside the narrative
+Display:    visibly labelled as generated; rendered in a UI region distinct
+            from SCP facts
+```
+
+A narrative that cannot be reconstructed from its stored payload is not
+auditable and must not ship.
+
+## 8.4 Immutability
+
+An explanation is versioned with its model and feature versions and stored
+immutably. **Never regenerate an explanation for a past decision with a newer
+model.** When a supervisor's judgement is questioned years later, they must be
+able to show what they were actually shown.
+
+---
+
+# 9. STAGES G–I — REVIEW, FEEDBACK, RETRAINING
+
+## 9.1 Review
+
+Four outcomes, all executed by the supervisor through the existing SCP workflow:
+`Sign-off`, `Raise RFI`, `Move`, `None`. The system executes none of them.
+
+UI must visually separate: original SCP facts | inferred relationships | model
+outputs | generated narrative. Four distinct treatments, consistently applied.
+
+## 9.2 Feedback capture
+
+Disposition alone is a poor label. Sign-off does not mean "not anomalous" — it
+may mean a false negative was never investigated. Training on disposition
+teaches the model to reproduce existing supervisor behaviour including its blind
+spots.
+
+Capture three structured signals at review time:
+1. **Grouping correct?** accept / should split / should merge with X
+2. **Explanation useful?** yes / no
+3. **Priority right?** too high / right / too low
+
+Signal 1 is the highest-value label in the system because it supervises the
+deterministic linking layer, which can be corrected precisely. Route grouping
+corrections to threshold review, **not** to a model.
+
+## 9.3 Control sample
+
+Inliers are never reviewed, so they never generate labels, so the model's view
+of them is never challenged. Left alone the feedback loop confirms its own
+priors indefinitely.
+
+Route 2–5% of inliers for review each period, selected randomly. This is the
+**only** mechanism that produces a false-negative estimate. Budget the supervisor
+capacity explicitly — it will be the first thing cut under pressure, and cutting
+it blinds the entire governance programme.
+
+## 9.4 Retraining
+
+- Fixed cadence. Never automatic. Never volume-triggered.
+- Champion/challenger: shadow-run against live traffic without affecting the
+  queue for a defined period.
+- Promotion criteria agreed **in advance**: precision@k of the queue, grouping
+  precision/recall, supervisor-reported grouping error rate, time-to-decision.
+- Model risk governance sign-off before promotion.
+- Deploy as a new version with an effective-from date. **Historical scores are
+  never recomputed.**
+
+---
+
+# 10. CROSS-CUTTING REQUIREMENTS
+
+## 10.1 Persistence
+
+```
+Stores: alert_store (read-only projection), episode_store, edge_store,
+        feature_store, model_results_store, explanation_store,
+        review_outcomes_store, model_registry_store
+
+Bitemporal on every table:
+  valid_from / valid_to    business time
+  recorded_at              system time
+
+APPEND ONLY. No UPDATE on features, scores, explanations, episodes.
+Corrections are new rows with supersession pointers.
+```
+
+Retention: model artifacts, training snapshot refs, feature vectors and
+explanations retain for the **same period as the underlying alerts**
+`[UNKNOWN]`. Auditing a 2027 decision in 2032 requires the 2027 model and the
+2027 feature vector. Retaining scores while discarding the model that produced
+them fails the audit.
+
+## 10.2 Entitlements
+
+An episode inherits the entitlement of its **most restrictive** member. Grouping
+must never become a mechanism for a supervisor to see an alert they are not
+entitled to.
+
+Where an episode spans an entitlement boundary: render non-entitled members as
+redacted placeholders and **record on the episode that the displayed evidence is
+partial** — the score was computed over the full set and the supervisor is
+seeing a subset of its basis. Policy for this case is `[UNKNOWN]`; flag and stop.
+
+## 10.3 Configuration
+
+- Every threshold, weight, tolerance, cap and window from injected config
+- **No numeric literals in logic**
+- Startup validation: fail loudly and refuse to start on missing config
+- Config is versioned; the version is stamped on every artifact it influenced
+- Config changes are auditable events
+
+## 10.4 Idempotency and replay
+
+```
+Stage keys:
+  ingest      (alert_id, ruleset_version)
+  linking     (alert_id_set_hash, ruleset_version)
+  features    (episode_id, episode_version, feature_set_version)
+  scoring     (episode_id, episode_version, model_version, feature_set_version)
+  explanation (episode_id, episode_version, model_version)
+```
+
+Replay produces identical output and commits nothing new. This enables recovery
+from partial failure, threshold evaluation against history, challenger shadow
+runs, and regenerating a lost projection from immutable stores.
+
+Build the **replay harness as a deliverable**, not as tooling deferred to later.
+It is how thresholds get approved, how every subsequent change gets approved,
+and how you answer "why 0.75?" in a governance forum.
+
+## 10.5 Kill switch
+
+A single feature flag disables the layer and degrades the UI to a plain alert
+list. **Exercise it in production readiness testing**, not just in design. If
+it has never been pulled, you do not know that it works.
+
+## 10.6 Observability
+
+```
+Linking (inherited):  tier mix, singleton rate, block-cap breaches, hub
+                      demotions, bridge rejections, merge-after-the-fact rate
+Features:             computation latency, imputation rate by feature,
+                      peer fallback rate, cold-start rate
+Scoring:              per-model latency and error rate, circuit breaker state,
+                      degraded rate, missing-model counts, score distribution
+                      drift, PSI on feature distributions
+Queue:                bucket distribution, B0 share, undated rate,
+                      starvation escalations, time-to-decision
+Business:             reconstruction time saved per review (PRIMARY KPI —
+                      baseline it BEFORE go-live or you cannot prove the
+                      project worked), precision@k, % reviewed before deadline
+```
+
+Alarm on tier-mix shift and singleton-rate shift together — that pair is your
+earliest warning that the CAL feed changed underneath you.
+
+## 10.7 Testing
+
+**Property tests** (these will not be caught by example-based tests):
+- Determinism: same input + version → byte-identical output, N shuffles
+- Idempotence: reprocess → zero new versions
+- Point-in-time: no feature reads data with `recorded_at > as_of_ts`
+- Feature-version guard: mismatched vector/model is rejected, not scored
+- Percentile monotonicity: higher raw score → higher-or-equal percentile
+- Degradation: every rung of the §6.7 ladder renders a usable queue
+
+**Golden set**: the five business archetypes (cancel & rebook, cancel & correct,
+late-then-corrected, serial amendment, standalone) with expected features,
+scores and explanations. Runs on every release.
+
+**Adversarial**: NaN and inf features, empty peer group, all models timing out,
+feature-set version skew, duplicate delivery, clock skew, entitlement-split
+episode, 500-member episode.
+
+**Model validation**: conceptual soundness, outcomes analysis, ongoing
+monitoring, documented per version.
+
+---
+
+# 11. BUILD ORDER
+
+Do not parallelise across phases. Each phase must be demonstrably working before
+the next begins.
+
+```
+Phase 0   Ingest, normalise, [linking already done], episode queue ordered by
+          SLA alone. No ML. Replay harness. Shadow-run alongside the current
+          process and MEASURE reconstruction time saved.
+
+          This phase alone addresses the stated business problem and carries
+          almost no model risk. Do not skip it to reach the models faster.
+
+Phase 1   Feature engineering. Deterministic baseline. Isolation Forest.
+          Peer-partitioned LOF. Percentile normalisation and consensus.
+          TreeSHAP explanations. Linkage rationale. Two-axis prioritisation.
+          Full degradation ladder.
+
+Phase 2   Prophet series layer. Structured feedback capture. Control sampling.
+          First governed retraining cycle end to end.
+
+Phase 3   One-Class SVM and/or autoencoder — admitted only on demonstrated lift
+          over the Phase 1 ensemble on a held-out labelled set.
+```
+
+---
+
+# 12. PROHIBITIONS — restated
+
+- Never write to SCP or the CAL alert store, by any path.
+- Never invent a threshold, tolerance, weight or cap. Read from config; fail
+  loudly if absent.
+- Never call `.fit()` in an inference path.
+- Never average raw model scores. Percentile-normalise first.
+- Never use wall clock where `as_of_ts` is specified.
+- Never count `episode_id` for history. Use `lineage_root_id`.
+- Never recompute a historical score, feature vector or explanation with a newer
+  version.
+- Never render a degraded, cold-start or partial result as a normal one.
+- Never let a generated narrative introduce a fact absent from its payload.
+- Never resolve ambiguity silently. Stop and ask.
+- Never relax a constraint in this document because it looks restrictive. Raise
+  it as a labelled note instead.
+```
