@@ -51,6 +51,8 @@ def event(
     instrument: str = "I1",
     book: str = "B1",
     rec: float | None = None,
+    side: str | None = None,
+    original: str | None = None,
 ) -> TradeEvent:
     return TradeEvent(
         trade,
@@ -61,6 +63,8 @@ def event(
         book,
         None if price is None else Decimal(price),
         None if qty is None else Decimal(qty),
+        side,
+        original,
     )
 
 

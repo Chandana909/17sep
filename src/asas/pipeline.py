@@ -29,6 +29,8 @@ from asas.sources import ReadOnlySource, assert_pit
 class RunResult:
     as_of: datetime
     config_version: str
+    mapping_version: str
+    data_unavailable: tuple[str, ...]
     cases: tuple[ReviewCase, ...]
     cohorts: tuple[CohortProposal, ...]
     case_reports: dict[str, str]
@@ -51,6 +53,8 @@ class RunResult:
             "config_version": self.config_version,
             "field_contract_version": FIELD_CONTRACT_VERSION,
             "alias_mapping_version": ALIAS_MAPPING_VERSION,
+            "mapping_version": self.mapping_version,
+            "data_unavailable": self.data_unavailable,
             "cases": self.cases,
             "cohorts": self.cohorts,
             "individual_queue": self.individual_queue,
@@ -88,8 +92,11 @@ def run(
     episodes = link_episodes(alerts, events, window)
     alerts_by_id = {a.alert_id: a for a in alerts}
     raw_cases = [build_case(e, alerts_by_id, events, rfis, past, cfg, as_of) for e in episodes]
+    flags = _coverage_reasons(source.unavailable, cfg)
     if window_missing:
-        raw_cases = [_flag_missing_window(c) for c in raw_cases]
+        flags.append("CONFIG_MISSING:linking.window_hours")
+    if flags:
+        raw_cases = [_flag(c, flags) for c in raw_cases]
     cohorts, cases = propose_cohorts(raw_cases, cfg)
 
     annex_by_alert: dict[str, list[AlertAnnex]] = defaultdict(list)
@@ -126,6 +133,8 @@ def run(
     return RunResult(
         as_of=as_of,
         config_version=cfg.version,
+        mapping_version=source.mapping_version,
+        data_unavailable=tuple(sorted(source.unavailable)),
         cases=cases,
         cohorts=cohorts,
         case_reports=case_reports,
@@ -135,9 +144,32 @@ def run(
     )
 
 
-def _flag_missing_window(case: ReviewCase) -> ReviewCase:
+_COVERAGE_KEYS = {
+    "trade_events": None,  # always required: nothing is verifiable without lifecycles
+    "rfi_events": "rfi_source_required",
+    "past_cases": "history_source_required",
+}
+
+
+def _coverage_reasons(unavailable: frozenset[str], cfg: Config) -> list[str]:
+    """Absence of data is not confirmation (rail 7): a missing required source blocks bulk.
+    A missing `data.*_required` key fails safe to 'required'."""
+    reasons: list[str] = []
+    for entity, key in _COVERAGE_KEYS.items():
+        if entity not in unavailable:
+            continue
+        try:
+            required = key is None or cfg.require("data", key) is not False
+        except ConfigMissing:
+            required = True
+        if required:
+            reasons.append(f"DATA_UNAVAILABLE:{entity}")
+    return reasons
+
+
+def _flag(case: ReviewCase, reasons: list[str]) -> ReviewCase:
     return dataclasses.replace(
         case,
         treatment=Treatment.INDIVIDUAL_REVIEW,
-        reasons=(*case.reasons, "CONFIG_MISSING:linking.window_hours"),
+        reasons=tuple(dict.fromkeys((*case.reasons, *reasons))),
     )

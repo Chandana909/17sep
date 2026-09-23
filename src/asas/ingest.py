@@ -37,7 +37,7 @@ def parse_ts(value: object, field: str) -> datetime:
 def parse_decimal(value: object, field: str) -> Decimal | None:
     if value is None or value == "":
         return None
-    if isinstance(value, bool) or not isinstance(value, str | int | Decimal):
+    if isinstance(value, bool) or not isinstance(value, str | int | float | Decimal):
         raise DataContractError(f"{field}: not a decimal")
     try:
         result = Decimal(str(value).strip())
@@ -52,6 +52,22 @@ def parse_str(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise DataContractError(f"{field}: required non-empty string")
     return value.strip()
+
+
+SIDES = frozenset({"BUY", "SELL"})
+
+
+def _optional_str(value: object, field: str) -> str | None:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return parse_str(value, field)
+
+
+def _side(value: object) -> str | None:
+    side = _optional_str(value, "SIDE")
+    if side is not None and side not in SIDES:
+        raise DataContractError(f"SIDE: unknown value {side!r}")
+    return side
 
 
 def _free_text(value: object, field: str) -> str | None:
@@ -114,6 +130,8 @@ def parse_trade_events(rows: Iterable[Row]) -> tuple[TradeEvent, ...]:
                 book_id=parse_str(row.get("BOOK_ID"), "BOOK_ID"),
                 price=parse_decimal(row.get("PRICE"), "PRICE"),
                 quantity=parse_decimal(row.get("QUANTITY"), "QUANTITY"),
+                side=_side(row.get("SIDE")),
+                original_trade_id=_optional_str(row.get("ORIGINAL_TRADE_ID"), "ORIGINAL_TRADE_ID"),
             )
         )
     return tuple(out)

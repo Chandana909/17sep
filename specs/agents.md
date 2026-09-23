@@ -4,13 +4,13 @@
 Agents draft prose only: case summaries, cohort summaries and RFI drafts. They decide nothing (rail 5).
 
 ## 2. Access
-LLM calls go only through `ModelGateway.complete(ModelRequest)`. Tests use `FakeModelGateway` (fixture per task).
+LLM calls go only through `ModelGateway.complete(ModelRequest)`. Implementations: `FakeModelGateway` (tests), `OpenAICompatibleGateway` (any `/chat/completions` endpoint, temperature 0), `ReplayGateway`/`RecordingGateway` (audit replay). `adapters/gateways.build_gateway(cfg)` selects one from `[agents] provider`; any misconfiguration yields no gateway, so templates are used.
 
 ## 3. Inputs
-Each request carries the system prompt, fact ids with labels (never values), and untrusted free text wrapped by `delimit()`.
+Each request carries the system prompt, the deterministic draft with placeholders only, fact ids with labels (never values), and untrusted free text wrapped by `delimit()`. Small models do best when rewriting the draft rather than composing from scratch.
 
 ## 4. Output validation (rail 4)
-`validate_prose`: every `{{F<n>}}` must reference a known fact. No numeric character (any Unicode `isnumeric`) may appear outside placeholders, except tokens in `agents.digit_whitelist`. Malformed braces and empty output are rejected.
+`clean_model_text` first strips `<think>` blocks, markdown fences and wrapping quotes (common in Qwen-class output). It never adds content. Then `validate_prose`: every `{{F<n>}}` must reference a known fact. No numeric character (any Unicode `isnumeric`) may appear outside placeholders, except tokens in `agents.digit_whitelist`. Malformed braces and empty output are rejected.
 
 ## 5. Fallback
 On a validation failure or gateway exception, the output is the deterministic template rendered with the same facts.

@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection, Sequence
 
 from asas.report import PLACEHOLDER
+
+_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_FENCE = re.compile(r"^```[a-zA-Z]*\n?|\n?```$")
+
+
+def clean_model_text(text: str) -> str:
+    """Strip reasoning blocks and markdown fences that small models (e.g. Qwen) often emit.
+    Cleaning never adds content; validation still runs on the result."""
+    text = _THINK.sub("", text).strip()
+    text = _FENCE.sub("", text).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
 
 
 def validate_prose(

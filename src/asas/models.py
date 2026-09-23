@@ -63,6 +63,8 @@ class TradeEvent:
     book_id: str
     price: Decimal | None
     quantity: Decimal | None
+    side: str | None = None  # BUY / SELL
+    original_trade_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

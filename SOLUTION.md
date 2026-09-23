@@ -34,3 +34,16 @@ ReadOnlySource(as_of) ─► assert_pit ─► link_episodes ─► build_case �
 ## Fail-safe behaviour
 
 Any `ConfigMissing` on a decision path adds `CONFIG_MISSING:<key>` and routes the case to individual review. A missing linking window disables cross-alert linking and flags every case. A missing cohort size puts every candidate into individual review.
+
+## Data and model coupling (Phases 1–4)
+
+| Concern | Module | Changed by |
+|---|---|---|
+| Real column names, codes, timestamp formats | `config/mapping.*.toml` → `mapping.py` | editing TOML (`docs/INTEGRATION.md`) |
+| CSV / DB access | `adapters/csv_source.py`, `adapters/sql_source.py` | `--data`, `--sqlite`, `--db-factory` |
+| Claim checks | `checkers/*.py` (registry) | new plugin + config (`docs/BUSINESS_CHANGES.md`) |
+| Evidence items | `evidence.py` (registry) | new predicate + config |
+| LLM provider (e.g. Qwen) | `adapters/openai_compat.py`, `adapters/gateways.py` | `[agents]` config |
+| Outputs | `output.py`, `cli.py` | — |
+
+Coverage: an entity with no mapping is reported in `decisions.data_unavailable`. A missing trade-event or (by default) RFI source routes every case to individual review.

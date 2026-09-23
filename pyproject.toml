@@ -12,6 +12,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.11", "mypy>=1.10"]
 
+[project.scripts]
+asas = "asas.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -20,6 +20,10 @@ DECISION_MODULES = [
     "priority.py",
     "cases.py",
     "cohorts.py",
+    "checkers/registry.py",
+    "checkers/corrections.py",
+    "checkers/rebook.py",
+    "checkers/unverifiable.py",
 ]
 ALLOWED_INTS = {0, 1}
 NUMERIC_STR = re.compile(r"^-?\d+(\.\d+)?$")
@@ -76,6 +80,19 @@ def test_sources_expose_no_mutation(cls: type) -> None:
     verbs = ("insert", "update", "delete", "write", "execute", "commit", "save", "put", "set")
     public = [n for n in dir(cls) if not n.startswith("_")]
     assert not [n for n in public if n.startswith(verbs)]
+
+
+def test_every_checker_module_is_statically_audited() -> None:
+    on_disk = {f"checkers/{p.name}" for p in (SRC / "checkers").glob("*.py")} - {
+        "checkers/__init__.py"
+    }
+    assert on_disk <= set(DECISION_MODULES)
+
+
+def test_sql_adapter_contains_no_mutating_sql() -> None:
+    text = (SRC / "adapters" / "sql_source.py").read_text(encoding="utf-8").upper()
+    for verb in ("INSERT ", "UPDATE ", "DELETE ", "DROP ", "CREATE ", "ALTER ", "MERGE ", "COMMIT"):
+        assert verb not in text, verb
 
 
 def test_no_autonomous_business_actions_anywhere() -> None:

@@ -51,9 +51,10 @@ Never `git push`. The user pushes.
 ## Repository facts (Phase 0)
 
 * Language / version: Python 3.11 (stdlib only at runtime; `tomllib`, `decimal`, frozen dataclasses).
-* Package layout: `src/asas/` (src layout); agents in `src/asas/agents/`; tests in `tests/` (flat, `factories.py` shared builders); config in `config/asas.v1.toml`.
-* Existing linking module path: `src/asas/linking.py` (no prior SCP CAL repo was present; created in Phase 0).
-* DB / storage: none yet. `ReadOnlySource` protocol + `InMemorySource`; SQL adapter proposed in `docs/SAD.md`.
+* Package layout: `src/asas/` core; `src/asas/checkers/` claim plugins; `src/asas/agents/` prose runtime (no I/O); `src/asas/adapters/` data sources and model gateways; `tests/` flat with `factories.py`; `config/` decision config and source mappings; `data/sample/` SCP-shaped sample data.
+* Existing linking module path: `src/asas/linking.py`.
+* DB / storage: `ReadOnlySource` protocol → `MappedSource` over `CsvReader` / `SqlReader` (DB-API, SELECT-only). Output: files via `src/asas/output.py`.
 * Test command: `python -m pytest` (pytest + hypothesis).
 * Lint / type command: `python -m ruff check src tests scripts && python -m ruff format --check src tests scripts`; `python -m mypy` (strict).
 * `make check` runs: lint → type → test. Windows without make: `python scripts/check.py` (same steps).
+* CLI: `python -m asas {run,check-mapping,check-config,init-mapping}`.

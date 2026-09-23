@@ -40,6 +40,13 @@ def assert_pit(records: Iterable[HasRecordTime], as_of: datetime) -> None:
 
 
 class ReadOnlySource(Protocol):
+    @property
+    def mapping_version(self) -> str: ...
+    @property
+    def unavailable(self) -> frozenset[str]:
+        """Entities with no configured source (e.g. RFI events not yet integrated)."""
+        ...
+
     def alerts(self, as_of: datetime) -> tuple[Alert, ...]: ...
     def annexes(self, as_of: datetime) -> tuple[AlertAnnex, ...]: ...
     def trade_events(self, as_of: datetime) -> tuple[TradeEvent, ...]: ...
@@ -54,6 +61,8 @@ class InMemorySource:
     all_trade_events: tuple[TradeEvent, ...] = ()
     all_rfi_events: tuple[RfiEvent, ...] = ()
     all_past_cases: tuple[PastCase, ...] = ()
+    mapping_version: str = "in-memory"
+    unavailable: frozenset[str] = frozenset()
 
     def alerts(self, as_of: datetime) -> tuple[Alert, ...]:
         return visible(self.all_alerts, as_of)
