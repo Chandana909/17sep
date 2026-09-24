@@ -1,0 +1,80 @@
+# Map real SCP/CAL column names (left) to ASAS contract fields (right). Every source column
+# must be mapped or listed in `ignore`; anything else fails loudly (schema drift).
+# Ingest with:  python -m asas ingest --db out/asas.db --data <dir> --mapping config/mapping.example.toml
+version = "mapping-example-1"
+
+[trade_events]
+source = "cal_trade_versions.csv"
+naive_timestamp_offset = "+00:00"
+ignore = ["COST_CENTER", "REGION"]
+
+[trade_events.columns]
+TRADE_ID = "TRADE_ID"
+ORIGINAL_TRADE_VERSION = "TRADE_VERSION"
+EVENT_SUB_TYPE_ID = "EVENT_TYPE"
+TRADE_DATE_TIME = "EVENT_TIME"
+CREATED_AT = "RECORD_TIME"
+BOOK = "BOOK"
+DESK = "DESK"
+INSTRUMENT_IDENTIFIER = "INSTRUMENT_ID"
+PRODUCT_TYPE = "PRODUCT_TYPE"
+BUY_OR_SELL = "SIDE"
+QUANTITY = "QUANTITY"
+PRICE = "PRICE"
+CURRENCY = "CURRENCY"
+NET_CONSIDERATION_USD = "NOTIONAL_USD"
+ORIGINAL_TRADE_ID = "ORIGINAL_TRADE_ID"
+ALTERNATE_TRADE_ID = "ALTERNATE_TRADE_ID"
+URN_REF = "URN_REF"
+SOURCE = "SOURCE"
+TRADE_MODIFIER = "TRADER_ID"          # person field: quarantined, entitlement-gated
+
+[trade_events.values.EVENT_TYPE]
+NEW = "NEW"
+AMD = "AMEND"
+CXL = "CANCEL"
+
+[trade_events.values.SIDE]
+B = "BUY"
+S = "SELL"
+
+[alerts]
+source = "scp_alerts.csv"
+naive_timestamp_offset = "+00:00"
+ignore = ["ALERT_TYPE_DESC", "LOCATION"]
+
+[alerts.columns]
+ALERT_ID = "ALERT_ID"
+ALERT_TYPE_ID = "RULE_ID"
+MX_ALERT_TYPE = "SUBRULE_ID"
+ALERT_DATE = "ALERT_TIME"
+CREATED_AT = "RECORD_TIME"
+TRADE_ID = "TRADE_ID"
+BOOK = "BOOK"
+DESK = "DESK"
+INSTRUMENT_IDENTIFIER = "INSTRUMENT_ID"
+REASON_COMMENT = "EXPLANATION_TEXT"   # untrusted free text
+REASON_STD_COMMENTS = "REASON_STD_COMMENTS"  # workflow: quarantined
+RULE_FLAG = "RULE_FLAG"                      # workflow: quarantined
+SUPERVISOR_GRP = "SUPERVISOR_GRP"            # person: quarantined
+
+[rfi_events]
+source = "scp_rfi_events.csv"
+naive_timestamp_offset = "+00:00"
+
+[rfi_events.columns]
+ALERT_ID = "ALERT_ID"
+ACTION = "RFI_ACTION"
+CREATED_AT = "RECORD_TIME"
+
+[outcomes]
+source = "curated_outcomes.csv"
+naive_timestamp_offset = "+00:00"
+
+[outcomes.columns]
+OUTCOME_ID = "OUTCOME_ID"
+ALERT_ID = "ALERT_ID"
+OUTCOME = "OUTCOME"
+LABEL_QUALITY = "LABEL_QUALITY"
+DECIDED_AT = "DECIDED_AT"
+DECIDED_BY = "DECIDED_BY"

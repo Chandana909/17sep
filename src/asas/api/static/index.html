@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASAS Console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">ASAS <span>auditable agentic surveillance</span></div>
+    <nav id="tabs">
+      <button data-view="overview" class="active">Overview</button>
+      <button data-view="cases">Cases</button>
+      <button data-view="links">Relationships</button>
+      <button data-view="challenge">Challenger</button>
+      <button data-view="evolution">Discovery &amp; Governance</button>
+      <button data-view="policy">Policy</button>
+      <button data-view="audit">Audit</button>
+    </nav>
+    <label class="identity">Acting as
+      <select id="identity">
+        <option value="analyst.jane|investigator">analyst.jane (investigator)</option>
+        <option value="approver.omar|approver">approver.omar (approver)</option>
+        <option value="ops.admin|admin">ops.admin (admin)</option>
+        <option value="viewer.ann|viewer">viewer.ann (viewer)</option>
+      </select>
+    </label>
+  </header>
+  <main>
+    <section id="view-overview" class="view active"></section>
+    <section id="view-cases" class="view"></section>
+    <section id="view-case" class="view"></section>
+    <section id="view-links" class="view"></section>
+    <section id="view-challenge" class="view"></section>
+    <section id="view-evolution" class="view"></section>
+    <section id="view-policy" class="view"></section>
+    <section id="view-audit" class="view"></section>
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

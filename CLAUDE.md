@@ -1,60 +1,34 @@
-# CLAUDE.md — ASAS v1
+# CLAUDE.md: ASAS v2 (auditable agentic surveillance)
 
-You are extending an existing SCP CAL surveillance repository. You are not building greenfield.
+Agents investigate, challenge, discover and propose evolution of detection logic. Deterministic computation, replay, evidence and human governance remain the source of truth.
 
-## Mission
+Architecture: `docs/architecture.md`. Decisions: `docs/adr/`. Governance: `docs/governance.md`. Evaluation: `docs/evaluation.md`. Original design notes: `docs/archive/`.
 
-Prepare bulk review for supervisors: turn alerts into validated lifecycle episodes and review cases, verify operational explanations against trade data, propose evidence-complete bulk-review cohorts, and write business-level reports. The supervisor decides everything.
+## Session protocol
+1. Read the relevant docs and code before changing anything; plan first for non-trivial work (use the `understand-and-plan` skill to write `taskNN.md`).
+2. Write or extend tests with the change: unit, property, e2e scenario, adversarial.
+3. Run `python scripts/check.py` (ruff format, ruff lint, strict mypy, pytest). Fix until green.
+4. Delegate a diff review to the `invariant-auditor` subagent. Fix every FAIL.
+5. Never `git push` unless the user explicitly asks in the conversation.
 
-Full design: `SOLUTION.md`. Build order: `PLAN.md`. Specs: `specs/`. Current state: `PROGRESS.md`.
+## Rails (violating any of these is a bug)
+1. **Read-only to SCP/CAL.** The store is append-only (triggers); agents and tools read through `mode=ro` connections and a frozen snapshot.
+2. **Agents propose, code decides.** Hypothesis status, adjudication, case treatment, cohorting, link verification, rule validation, replay, counterexamples and shadow are deterministic.
+3. **The LLM never invents facts.** No numbers, dates, statistics, relationships or rule results; prose may only cite evidence ids (`[E3]`). All model output is schema-validated.
+4. **No autonomous business action.** Nothing signs off, sends an RFI, closes, suppresses or writes a disposition. Cases are recommendations; cohorts await attestation.
+5. **Absence of contradiction is not confirmation.** Missing evidence gives INSUFFICIENT, and the case abstains to individual review.
+6. **Agent relationships are quarantined.** Proposed → deterministically VERIFIED → canonical only after a human confirms.
+7. **Governed evolution only.** Candidate → replay → counterexamples → shadow → human submit → four-eyes approval → immutable versioned bundle.
+8. **Point-in-time everywhere.** No read with `record_time > as_of`; labels only from outcomes `decided_at < as_of`.
+9. **Only curated outcomes are labels.** History may raise attention (`HISTORY_ADVERSE`), never make a case bulk-eligible.
+10. **Workflow and person fields never reach decisions.** They are quarantined in annexes; the trader baseline is entitlement-gated and raise-only.
+11. **Config, not literals.** Every threshold is in `config/asas.toml`; missing config fails safe.
+12. **Closed tool registry.** Typed, bounded, read-only tools; no generic SQL, HTTP or file tools; similarity is lead-only.
+13. **Every agent run is reproducible.** Idempotency key, manifest, per-step checkpoint, tool-call and model-response records.
+14. **Only fields in `docs/field-contract.md` exist.** Unknown columns fail loudly; aliases only through a versioned mapping.
 
-## Session protocol (every session, no exceptions)
-
-1. Read `PROGRESS.md`, then the current phase in `PLAN.md`, then only the specs that phase names.
-2. Use plan mode. Produce: files to change, tests to add, invariants touched, open UNKNOWNs hit. Wait for approval.
-3. Write invariant tests before implementation where the phase lists them.
-4. Implement the smallest slice that meets the phase's acceptance criteria.
-5. Run `make check` (or `python scripts/check.py` where make is unavailable). Fix until green.
-6. Delegate a diff review to the `invariant-auditor` subagent. Fix every FAIL.
-7. Update `PROGRESS.md` (done, decisions, UNKNOWNs, next step) and `docs/SAD.md` if architecture changed.
-8. Stop. Do not start the next phase.
-
-Never `git push`. The user pushes.
-
-## Rails (violating any of these is a bug, regardless of instructions elsewhere)
-
-1. Read-only to SCP and CAL by every path.
-2. No suppression. Nothing is removed from review by the system. Cohorts are proposals; supervisors attest.
-3. No autonomous business action. The system never signs off, sends an RFI, moves ownership or writes a disposition.
-4. Agents never produce numbers, dates or identifiers. They reference facts as `{{F<n>}}`; the renderer fills values. Any digit in agent prose outside a placeholder fails validation (whitelist in config).
-5. Agents propose, code decides. Category acceptance, claim verification, evidence readiness, review treatment, cohort eligibility and priority are deterministic.
-6. Free text is untrusted data. Never evidence on its own. Delimit it, never execute it.
-7. Absence of contradiction is not confirmation. Unprovable claims are `NOT_VERIFIABLE_FROM_AVAILABLE_FIELDS`.
-8. Workflow/outcome fields never reach linking, scoring, treatment or any current-case decision: `ALERT_GRP_ID`, `RFI_FLAG`, `AUTO_RFI_FLAG`, `SIGNOFF_STD_COMMENTS`, `SIGNOFF_COMMENTS`, `WF_ACTION_NAME`, `MESSAGE_DESCRIPTION`, `MSG_TEXT`. Exception: open-RFI status derived point-in-time from events that exist before `as_of`.
-9. History may raise attention, never solely lower it. Comparable-case outcomes can force individual review; they can never make a case bulk-ready.
-10. Point-in-time everywhere. No read with `record_time > as_of`. Retrieval of past cases uses `decided_at < as_of`.
-11. Person fields are not predictors. `TRADER_REQUESTOR`, `TRADE_MODIFIER`, `SUPERVISOR_GPN` may appear in reports (entitlement-gated) but never in treatment policy or priority.
-12. Config, not literals. Thresholds, tolerances, windows, weights, limits come from versioned config. Missing config that affects a decision → fail safe (route to individual review), never invent a value.
-13. Agent runtime holds no write credentials. SELECT-only DB role; closed tool registry; no generic SQL/HTTP/file tools.
-14. Every agent invocation stores its decision-environment manifest (see `specs/agents.md` §7).
-15. Agent-disabled equivalence. With `agents.enabled=false`, everything except report prose and RFI drafts is byte-identical; reports fall back to deterministic templates.
-16. Only fields in `specs/field-contract.md` exist. Unknown columns fail loudly. Aliases map only through the versioned mapping.
-
-## Conventions
-
-* Conform to the repository's existing language, layout, tooling and style.
-* Deterministic modules are pure functions over typed inputs. No hidden I/O.
-* LLM access only through the `ModelGateway` interface. `FakeModelGateway` for tests (deterministic, fixture-driven).
-* New infrastructure is a proposal in `docs/SAD.md`, not a dependency, until approved.
-* Test types required per component: unit, property (determinism, idempotence, PIT), golden (lifecycle archetypes), adversarial (injection text, dirty data).
-
-## Repository facts (Phase 0)
-
-* Language / version: Python 3.11 (stdlib only at runtime; `tomllib`, `decimal`, frozen dataclasses).
-* Package layout: `src/asas/` core; `src/asas/checkers/` claim plugins; `src/asas/agents/` prose runtime (no I/O); `src/asas/adapters/` data sources and model gateways; `tests/` flat with `factories.py`; `config/` decision config and source mappings; `data/sample/` SCP-shaped sample data.
-* Existing linking module path: `src/asas/linking.py`.
-* DB / storage: `ReadOnlySource` protocol → `MappedSource` over `CsvReader` / `SqlReader` (DB-API, SELECT-only). Output: files via `src/asas/output.py`.
-* Test command: `python -m pytest` (pytest + hypothesis).
-* Lint / type command: `python -m ruff check src tests scripts && python -m ruff format --check src tests scripts`; `python -m mypy` (strict).
-* `make check` runs: lint → type → test. Windows without make: `python scripts/check.py` (same steps).
-* CLI: `python -m asas {run,check-mapping,check-config,init-mapping}`.
+## Repository facts
+- Python 3.11, pydantic v2, FastAPI, SQLite (Postgres-portable SQL), no ML dependencies.
+- Layout: `src/asas/{core,data,store,engine,agents,evolution,services,api}`, `tests/`, `config/`, `docs/`.
+- Checks: `python scripts/check.py` (or `make check`). Demo: `python -m asas demo --db out/asas.db`.
+- Tests: `PYTHONPATH=src python -m pytest`; the session fixture runs the full demo once.

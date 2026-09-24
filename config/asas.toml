@@ -1,0 +1,195 @@
+# ASAS decision environment. Every threshold, tolerance, window, weight and limit lives here.
+# Decimals are strings (no float drift). Bump `version` on any change: it is stamped on every
+# run manifest, snapshot and policy decision. Missing decision keys fail safe.
+version = "asas-config-2.0.0"
+
+[pipeline]
+review_window_days = 30          # cases are opened for alerts in this window; older data is history
+
+[linking]
+version = "linking-3"
+max_span_hours = 336             # an episode never spans more than 14 days
+medium_max_gap_hours = 24        # medium-tier keys only link trades booked within a day
+max_key_fanout = 4               # a shared key linking more trades than this is a hub: demoted
+degenerate_values = ["", "0", "NA", "N/A", "NULL", "NONE", "UNKNOWN", "-", "TBD"]
+degenerate_patterns = ["0+", "9+"]
+rebook_window_hours = 6          # residue: candidate rebook must follow the cancel within 6h
+residue_max_candidates = 3
+
+[signals]
+period_end_cutoff_hours = "72"
+round_trip_min_pct = "0.2"
+round_trip_tolerance_pct = "0.05"
+signature_max_tokens = 8
+min_peer_n = 15
+peer_levels = ["desk_product", "desk", "global"]
+mad_scale = "1.4826"
+baseline_lookback_days = 60
+recurrence_window_days = 30
+
+[scoring]
+outlier_percentile = "95"
+outlier_signals = ["max_price_change_pct", "rebook_price_change_pct", "booking_latency_hours_max",
+                   "book_signature_recurrence", "notional_usd_max"]
+rarity_min_pct = "97"
+materiality_usd = "8000000"
+override_materiality_usd = "15000000"
+watchlist_books = []
+band_high = "3.0"
+band_elevated = "1.5"
+unknown_rule_severity = "MEDIUM"
+quality_flags_scored = ["FIRST_EVENT_NOT_NEW", "EVENTS_AFTER_CANCEL", "VERSION_GAP",
+                        "LINK_REJECTED_OVER_SPAN", "LINK_REJECTED_CROSS_INSTRUMENT",
+                        "HUB_DEMOTED_URN_REF", "HUB_DEMOTED_ALTERNATE_TRADE_ID",
+                        "DANGLING_ORIGINAL_TRADE_ID", "DEGENERATE_ORIGINAL_TRADE_ID"]
+
+[scoring.weights]
+detections = "0.5"
+outliers = "2"
+rarity = "1"
+materiality = "1"
+data_quality = "0.5"
+
+[scoring.rule_severity]
+R100 = "MEDIUM"
+R200 = "LOW"
+R300 = "MEDIUM"
+R400 = "LOW"
+R900 = "LOW"
+
+[scoring.rule_severity_weights]
+LOW = "0.5"
+MEDIUM = "1"
+HIGH = "2"
+
+[rules]
+max_conditions = 6
+
+[tools]
+max_items = 50
+related_window_hours = 72
+graph_max_depth = 2
+graph_max_nodes = 60
+similar_k = 5
+
+[hypotheses]
+routine_max_latency_hours = "1"
+routine_allowed_outliers = ["notional_usd_max"]
+price_correction_max_pct = "3.5"
+correction_window_hours = "1"
+rebook_qty_tolerance_pct = "0"
+rebook_price_tolerance_pct = "0.5"
+rebook_max_minutes = "120"
+late_booking_hours = "4"
+late_booking_missing_evidence = ["EXECUTION_TIMESTAMP_SOURCE_OF_RECORD", "SYSTEM_INCIDENT_REFERENCE"]
+off_market_min_pct = "3.5"
+off_market_percentile = "95"
+off_market_robust_z = "3.5"
+round_trip_min_pct = "0.2"
+period_end_hours = "72"
+churn_min_rebook_episodes = 2
+context_min_cleared = 3
+context_lookback_days = 90
+
+[decisions]
+blocking_degraded = ["NO_BASELINE"]
+blocking_quality_flags = ["FIRST_EVENT_NOT_NEW", "EVENTS_AFTER_CANCEL", "VERSION_GAP",
+                          "LINK_REJECTED_OVER_SPAN", "LINK_REJECTED_CROSS_INSTRUMENT",
+                          "HUB_DEMOTED_URN_REF", "HUB_DEMOTED_ALTERNATE_TRADE_ID",
+                          "DANGLING_ORIGINAL_TRADE_ID", "DEGENERATE_ORIGINAL_TRADE_ID"]
+control_sample_rate = "0.05"     # share of would-be-bulk cases forced to individual review
+control_sample_seed = "asas-control-1"
+cohort_min_size = 2
+cohort_max_size = 50
+
+[challenger]
+redundancy_min_alerts = 2
+exposure_rules = ["R400"]
+sampling_rules = ["R900"]
+max_findings_per_run = 40
+
+[discovery]
+min_support = 8
+max_itemset = 3
+ignored_items = ["flag:lifecycle_valid"]
+sample_size = 25
+min_risk_rate = "0.8"
+max_rule_coverage = "0.2"
+min_escalated_labels = 3
+min_curated_cleared = 10
+min_benign_rate = "0.8"
+max_patterns_per_kind = 3
+candidate_severity = "MEDIUM"
+max_volume_growth = "1.5"
+min_candidate_precision = "0.8"
+max_redundant_coverage = "0.8"   # skip a risk pattern an earlier proposal already covers
+
+[discovery.bands]
+max_price_change_pct = ["0.2", "1", "3.5"]
+booking_latency_hours_max = ["1", "4"]
+notional_usd_max = ["1000000", "5000000"]
+
+[replay]
+evaluation_delay_hours = 24
+window_days = 90
+sample_size = 10
+
+[counterexamples]
+perturbation_pct = "1"
+boundary_pct = "10"
+max_listed = 15
+min_labelled_per_half = 3
+stability_tolerance = "0.3"
+min_true_positives = 3
+min_precision = "0.8"
+max_false_positives = 2
+min_target_recall = "0.7"
+min_bulk_cleared = 10
+
+[shadow]
+window_days = 20
+max_new_alerts_per_day = 15
+min_assessed_precision = "0.6"
+
+[governance]
+four_eyes = true
+
+[policy]
+initial_bulk_scopes = [
+  { hypothesis_type = "CANCEL_REBOOK_CORRECTION", desk = "*" },
+  { hypothesis_type = "ROUTINE_EXECUTION", desk = "*" },
+]
+
+[security]
+dev_auth = true                  # header-based principals for local use; put OIDC in front in production
+
+[agents]
+enabled = false                  # true + a reachable endpoint = LLM policy; false = deterministic playbook
+base_url = "http://localhost:11434/v1"   # Ollama / vLLM / LM Studio / DashScope (OpenAI-compatible)
+model_id = "qwen2.5:7b-instruct"
+api_key_env = "ASAS_LLM_API_KEY"
+timeout_seconds = 60
+retries = 2
+backoff_seconds = "0.5"
+breaker_threshold = 5
+breaker_reset_seconds = 60
+max_prompt_chars = 16000
+max_output_tokens = 600
+
+[agents.budgets.investigator]
+max_steps = 40
+max_tool_calls = 24
+max_model_calls = 30
+max_seconds = 120
+
+[agents.budgets.challenger]
+max_steps = 200
+max_tool_calls = 150
+max_model_calls = 60
+max_seconds = 300
+
+[agents.budgets.discovery]
+max_steps = 40
+max_tool_calls = 20
+max_model_calls = 20
+max_seconds = 300

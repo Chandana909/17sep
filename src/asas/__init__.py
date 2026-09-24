@@ -1,6 +1,7 @@
-"""ASAS v1: prepares supervisor bulk review. Proposes only; the supervisor decides."""
+"""ASAS: auditable agentic surveillance.
 
-from asas.config import Config, ConfigMissing, load_config
-from asas.pipeline import RunResult, run
+Agents investigate, challenge, discover and propose; deterministic computation, replay,
+evidence and human governance remain the source of truth.
+"""
 
-__all__ = ["Config", "ConfigMissing", "RunResult", "load_config", "run"]
+__version__ = "2.0.0"

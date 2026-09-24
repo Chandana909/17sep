@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "asas-console",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/serve_dev.py"],
+      "port": 8765
+    }
+  ]
+}

@@ -1,19 +1,20 @@
 PY ?= python
+export PYTHONPATH := src
 
-.PHONY: check lint type test fmt
+.PHONY: check fmt test demo serve
 
-check: lint type test
-
-lint:
-	$(PY) -m ruff check src tests scripts
-	$(PY) -m ruff format --check src tests scripts
-
-type:
-	$(PY) -m mypy
-
-test:
-	$(PY) -m pytest
+check:
+	$(PY) scripts/check.py
 
 fmt:
 	$(PY) -m ruff format src tests scripts
 	$(PY) -m ruff check --fix src tests scripts
+
+test:
+	$(PY) -m pytest
+
+demo:
+	$(PY) -m asas demo --db out/asas.db --report out/evaluation.md
+
+serve:
+	$(PY) -m asas serve --db out/asas.db

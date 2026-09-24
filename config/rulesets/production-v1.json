@@ -1,0 +1,36 @@
+{
+  "rules": [
+    {
+      "rule_id": "R100",
+      "subrule_id": "R100.1",
+      "description": "Price amendment at or above the threshold",
+      "severity": "MEDIUM",
+      "conditions": [{"signal": "max_price_change_pct", "op": "ge", "param": "min_price_change_pct"}],
+      "parameters": {"min_price_change_pct": "1.0"}
+    },
+    {
+      "rule_id": "R200",
+      "subrule_id": "R200.1",
+      "description": "Trade cancellation",
+      "severity": "LOW",
+      "conditions": [{"signal": "has_cancel", "op": "eq", "value": "true"}],
+      "parameters": {}
+    },
+    {
+      "rule_id": "R300",
+      "subrule_id": "R300.1",
+      "description": "Late booking",
+      "severity": "MEDIUM",
+      "conditions": [{"signal": "booking_latency_hours_max", "op": "ge", "param": "max_latency_hours"}],
+      "parameters": {"max_latency_hours": "4"}
+    },
+    {
+      "rule_id": "R400",
+      "subrule_id": "R400.1",
+      "description": "Large notional",
+      "severity": "LOW",
+      "conditions": [{"signal": "notional_usd_max", "op": "ge", "param": "notional_threshold_usd"}],
+      "parameters": {"notional_threshold_usd": "5000000"}
+    }
+  ]
+}
