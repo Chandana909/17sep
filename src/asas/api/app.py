@@ -38,6 +38,7 @@ from asas.core.security import Principal
 from asas.domain.models import Case, OutcomeLabel
 from asas.engine import evidence as ev
 from asas.engine.graph import neighborhood
+from asas.services.integration import capability_matrix
 from asas.services.platform import Platform
 
 STATIC = Path(__file__).parent / "static"
@@ -332,6 +333,13 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
                     "alerts": len(c.alert_ids),
                     "cohort_id": c.cohort_id,
                     "control_sample": c.control_sample,
+                    "category": c.classification.category.value if c.classification else None,
+                    "severity": c.classification.severity if c.classification else None,
+                    "confidence": c.classification.confidence if c.classification else None,
+                    "residual_band": c.classification.residual_band if c.classification else None,
+                    "outlyingness": str(c.classification.outlyingness)
+                    if c.classification
+                    else None,
                 }
             )
         return _json(out)
@@ -515,6 +523,26 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
             reason=body.reason,
         )
         return _json(state.model_dump(mode="json"))
+
+    @app.get("/api/data/capabilities")
+    def data_capabilities(p: Principal = Depends(principal)) -> JSONResponse:
+        """What the loaded data supports, from the same capability model the engine uses."""
+        snap = platform.snapshot(as_of(None))
+        run = platform.latest_run()
+        return _json(
+            {
+                "as_of": snap.as_of.isoformat(),
+                "matrix": capability_matrix(snap.source, cfg, snap.policy.ruleset.rules),
+                "latest_run": {
+                    "degraded": run.degraded,
+                    "data_gates": list(run.data_gates),
+                    "unavailable_fields": list(run.unavailable_fields),
+                    "rule_gaps": list(run.rule_gaps),
+                }
+                if run
+                else None,
+            }
+        )
 
     @app.get("/api/context")
     def business_context(p: Principal = Depends(principal)) -> JSONResponse:

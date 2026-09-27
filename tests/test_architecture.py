@@ -147,3 +147,35 @@ def test_frontend_escapes_untrusted_and_free_text_fields() -> None:
         for match in re.finditer(rf"\$\{{([^}}]*{field}[^}}]*)\}}", js):
             expr = match.group(1)
             assert "esc(" in expr, (field, expr)
+
+
+def _hex_colours(css: str) -> list[str]:
+    return re.findall(r"#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b", css)
+
+
+def test_console_palette_is_red_grey_black_white_only() -> None:
+    """Product rule: the console uses only red, greys, black and white."""
+    css = (SRC / "api" / "static" / "styles.css").read_text(encoding="utf-8")
+    bad = []
+    for code in _hex_colours(css):
+        full = "".join(c * 2 for c in code) if len(code) == 3 else code
+        r, g, b = (int(full[i : i + 2], 16) for i in (0, 2, 4))
+        grey = r == g == b
+        red = r >= 150 and g <= 90 and b <= 110 and r - max(g, b) >= 100
+        if not (grey or red):
+            bad.append(code)
+    assert bad == []
+    assert not re.search(r"\b(rgb|rgba|hsl|hsla)\(", css)
+    named = r"\b(blue|green|orange|yellow|purple|teal|navy|gold|pink|cyan|magenta|lime|brown)\b"
+    assert not re.search(named, css, re.I)
+
+
+def test_console_has_no_inline_styles_or_external_resources() -> None:
+    """The CSP is `style-src 'self'; script-src 'self'`: nothing inline, nothing remote."""
+    static = SRC / "api" / "static"
+    for name in ("index.html", "app.js"):
+        text = (static / name).read_text(encoding="utf-8")
+        assert "style=" not in text, name
+        assert not re.search(r"https?://", text), name
+    html = (static / "index.html").read_text(encoding="utf-8")
+    assert "<script>" not in html and "onclick=" not in html
