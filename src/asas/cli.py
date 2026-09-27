@@ -8,6 +8,12 @@ asas pipeline  --db out/asas.db [--as-of ISO]
 asas challenge | discover --db out/asas.db [--as-of ISO]
 asas verify-audit --db out/asas.db
 
+asas doctor [--db <path>]                      production readiness checks
+asas audit keygen --out <dir>                  Ed25519 key pair for audit anchors
+asas audit anchor --db <path>                  sign the chain head into audit.anchor_dir
+asas audit verify --db <path> [--anchors <dir>]
+asas ops show|set --db <path> ...              audited safe mode
+
 asas data profile        --data <dir> [--json]
 asas data draft-mapping  --data <dir> --out config/mappings/<name>.toml
 asas data check          --data <dir> --mapping <file> [--json]
@@ -28,6 +34,7 @@ from typing import Any
 from asas.core.config import default_config_path, load_config
 from asas.core.errors import AsasError
 from asas.core.logging import configure_logging
+from asas.core.readiness import checks as readiness_checks
 from asas.core.security import SYSTEM, Principal, Role
 from asas.data.ingest import (
     SourceBundle,
@@ -43,6 +50,8 @@ from asas.services.demo import ADMIN, ANALYST, ruleset_path, run_demo
 from asas.services.evaluation import render_markdown
 from asas.services.integration import capability_matrix, render_matrix
 from asas.services.platform import Platform, build_gateway
+from asas.store.anchor import dump as dump_anchor
+from asas.store.anchor import generate_ed25519_keypair
 from asas.store.db import Store
 
 
@@ -180,6 +189,41 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    cfg = load_config(args.config)
+    results = readiness_checks(cfg, args.db or "")
+    for c in results:
+        print(f"{c.level:<5} {c.name:<16} {c.detail}")
+    env = cfg.string("security", "environment")
+    failed = [c for c in results if c.level == "FAIL"]
+    print(f"environment={env}: {'NOT READY' if failed else 'ready'}")
+    return 1 if failed else 0
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    if args.audit_command == "keygen":
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        private, public = generate_ed25519_keypair()
+        key_path, pub_path = out / "audit-signing-key.pem", out / "audit-public-key.pem"
+        if key_path.exists() or pub_path.exists():
+            print(f"refusing to overwrite keys in {out}", file=sys.stderr)
+            return 2
+        key_path.write_bytes(private)
+        pub_path.write_bytes(public)
+        print(f"wrote {key_path} (keep secret; set ASAS_AUDIT_SIGNING_KEY to its path)")
+        print(f"wrote {pub_path} (give to auditors; ASAS_AUDIT_PUBLIC_KEY)")
+        return 0
+    platform = _platform(args)
+    if args.audit_command == "anchor":
+        anchor = platform.anchor()
+        print(dump_anchor(anchor) if anchor else "audit log is empty: nothing to anchor")
+        return 0
+    report = platform.verify_audit(args.anchors)
+    print(json.dumps(report.to_dict(), indent=1))
+    return 0 if report.ok else 1
+
+
 def cmd_data_profile(args: argparse.Namespace) -> int:
     profiles = profile_directory(args.data)
     if args.json:
@@ -281,6 +325,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = with_db(sub.add_parser("verify-audit", help="verify the hash-chained audit log"))
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("doctor", help="production readiness checks (exit 1 on FAIL)")
+    p.add_argument("--db", default="", help="database path or URL to check")
+    p.set_defaults(func=cmd_doctor)
+
+    audit = sub.add_parser("audit", help="audit anchoring: keygen, anchor, verify")
+    asub = audit.add_subparsers(dest="audit_command", required=True)
+    p = asub.add_parser("keygen", help="generate an Ed25519 key pair for anchors")
+    p.add_argument("--out", required=True)
+    p = with_db(asub.add_parser("anchor", help="sign the chain head into audit.anchor_dir"))
+    p = with_db(asub.add_parser("verify", help="verify the chain and every external anchor"))
+    p.add_argument("--anchors", help="anchor directory (default: audit.anchor_dir)")
+    audit.set_defaults(func=cmd_audit)
 
     ops = with_db(sub.add_parser("ops", help="show or set the audited safe mode"))
     osub = ops.add_subparsers(dest="ops_command", required=True)

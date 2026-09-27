@@ -391,6 +391,19 @@ class Store:
             prev = digest
         return True, len(rows)
 
+    def audit_head(self) -> tuple[int, str] | None:
+        """(seq, hash) of the newest audit entry: what an external anchor signs."""
+        with self.reader() as conn:
+            row = conn.execute(
+                "SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+        return None if row is None else (int(row[0]), str(row[1]))
+
+    def audit_hash_at(self, seq: int) -> str | None:
+        with self.reader() as conn:
+            row = conn.execute("SELECT hash FROM audit_log WHERE seq = ?", (seq,)).fetchone()
+        return None if row is None else str(row[0])
+
     def audit_entries(self, limit: int) -> list[dict[str, Any]]:
         with self.reader() as conn:
             rows = conn.execute(

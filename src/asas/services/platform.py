@@ -84,6 +84,16 @@ from asas.evolution.replay import (
 )
 from asas.evolution.shadow import ShadowReport, shadow_bulk, shadow_detection
 from asas.services.ops import Ops
+from asas.store.anchor import (
+    Anchor,
+    AnchorError,
+    AnchorReport,
+    FileAnchorSink,
+    anchor_audit,
+    signer_from_config,
+    verifier_from_config,
+    verify_with_anchors,
+)
 from asas.store.db import Store, ts_key
 
 _log = get_logger("platform")
@@ -205,6 +215,7 @@ class Platform:
     ) -> None:
         self.cfg = cfg
         self.context = context or load_context()
+        self.database_url = str(store_path)
         self.store = Store(store_path)
         self.tracer = tracer or Tracer([StoreSpanExporter(self.store)])
         self.governance = Governance(self.store, cfg)
@@ -535,7 +546,30 @@ class Platform:
                 },
             )
             log_event(_log, "pipeline.completed", run_key=run_key, cases=report.cases)
+            if self.cfg.string("audit", "anchor_dir") and self.cfg.boolean(
+                "audit", "anchor_every_run"
+            ):
+                self.anchor()
             return report
+
+    def anchor(self) -> Anchor | None:
+        """Sign the audit chain head into the external anchor sink (audit.anchor_dir)."""
+        directory = self.cfg.string("audit", "anchor_dir")
+        if not directory:
+            raise AnchorError("audit.anchor_dir is not configured")
+        anchor = anchor_audit(self.store, signer_from_config(self.cfg), FileAnchorSink(directory))
+        if anchor is not None:
+            log_event(_log, "audit.anchored", seq=anchor.seq, key_id=anchor.key_id)
+        return anchor
+
+    def verify_audit(self, anchor_dir: str | None = None) -> AnchorReport:
+        directory = anchor_dir if anchor_dir is not None else self.cfg.string("audit", "anchor_dir")
+        if not directory:
+            ok, entries = self.store.verify_audit_chain()
+            return AnchorReport(ok, entries, 0, [] if ok else ["chain broken"])
+        return verify_with_anchors(
+            self.store, verifier_from_config(self.cfg), FileAnchorSink(directory).anchors()
+        )
 
     # ------------------------------------------------------------ challenge and discovery
 

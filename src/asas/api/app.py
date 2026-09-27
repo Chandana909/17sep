@@ -1,22 +1,28 @@
 """FastAPI application: the only interface the UI and external callers use.
 
-Authentication is pluggable: `security.dev_auth = true` reads the principal from headers
-(X-User, X-Roles, X-Desks, X-Person-Data) for local use; in production put an OIDC proxy in
-front and map its claims to the same headers. Authorisation is enforced in the services.
+Identity comes from the configured authenticator (core/auth.py): dev headers locally, an
+authenticating proxy, or OIDC bearer tokens. With `security.environment = "prod"` the app
+refuses to start when a readiness check fails (core/readiness.py). Every response carries
+security headers and a request id; bodies are size-limited; each principal is rate-limited.
+Authorisation (roles, desks, four-eyes) is enforced in the services, never in the UI.
 """
 
 from __future__ import annotations
 
 import json
+import time
+import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from asas.core.auth import Authenticator, AuthError, EntitlementError, build_authenticator
 from asas.core.errors import (
     AsasError,
     DataContractError,
@@ -24,13 +30,28 @@ from asas.core.errors import (
     PermissionDenied,
     ToolError,
 )
-from asas.core.security import Principal, Role
+from asas.core.logging import get_logger, log_event
+from asas.core.ratelimit import RateLimiter
+from asas.core.readiness import enforce
+from asas.core.security import Principal
 from asas.domain.models import Case, OutcomeLabel
 from asas.engine import evidence as ev
 from asas.engine.graph import neighborhood
 from asas.services.platform import Platform
 
 STATIC = Path(__file__).parent / "static"
+_log = get_logger("api")
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
 
 
 def _json(obj: Any) -> JSONResponse:
@@ -66,18 +87,65 @@ class OpsBody(BaseModel):
     reason: str
 
 
-def create_app(platform: Platform) -> FastAPI:
+def create_app(platform: Platform, authenticator: Authenticator | None = None) -> FastAPI:
+    cfg = platform.cfg
+    readiness = enforce(cfg, platform.database_url)  # prod + any FAIL: refuse to start
+    auth = authenticator or build_authenticator(cfg)
+    limiter = RateLimiter(cfg.integer("security", "rate_limit_per_minute"))
+    max_body = cfg.integer("security", "max_body_bytes")
+    prod = cfg.string("security", "environment") == "prod"
     app = FastAPI(
         title="ASAS",
-        version="2.0.0",
+        version="2.1.0",
         description="Auditable agentic surveillance: investigate, challenge, discover, evolve.",
     )
+    app.state.readiness = readiness
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    @app.middleware("http")
+    async def _envelope(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        request_id = request.headers.get("x-request-id", "")[:64] or uuid.uuid4().hex
+        started = time.perf_counter()
+        length = request.headers.get("content-length", "0")
+        if not length.isdigit() or int(length) > max_body:
+            response: Response = JSONResponse(
+                {"error": "PayloadTooLarge", "detail": f"body over {max_body} bytes"},
+                status_code=413,
+            )
+        else:
+            response = await call_next(request)
+        for name, value in SECURITY_HEADERS.items():
+            response.headers.setdefault(name, value)
+        if prod:
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
+        if request.url.path.startswith("/api"):
+            response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Request-ID"] = request_id
+        log_event(
+            _log,
+            "http.request",
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+        return response
 
     @app.exception_handler(AsasError)
     async def _errors(_: Request, exc: AsasError) -> JSONResponse:
         status = 400
-        if isinstance(exc, PermissionDenied):
+        if isinstance(exc, AuthError):
+            return JSONResponse(
+                {"error": "AuthError", "detail": str(exc)},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"} if auth.mode == "oidc" else {},
+            )
+        if isinstance(exc, PermissionDenied | EntitlementError):
             status = 403
         elif isinstance(exc, GovernanceError):
             status = 409
@@ -88,22 +156,13 @@ def create_app(platform: Platform) -> FastAPI:
         return JSONResponse({"error": type(exc).__name__, "detail": str(exc)}, status_code=status)
 
     def principal(request: Request) -> Principal:
-        if not platform.cfg.boolean("security", "dev_auth"):
-            raise HTTPException(401, "authentication proxy required")
-        roles = frozenset(
-            Role(r.strip())
-            for r in request.headers.get("X-Roles", "viewer").split(",")
-            if r.strip() in Role._value2member_map_
-        )
-        desks = frozenset(
-            d.strip() for d in request.headers.get("X-Desks", "*").split(",") if d.strip()
-        )
-        return Principal(
-            user_id=request.headers.get("X-User", "anonymous"),
-            roles=roles or frozenset({Role.VIEWER}),
-            desks=desks or frozenset({"*"}),
-            person_data=request.headers.get("X-Person-Data", "false") == "true",
-        )
+        who = auth.authenticate(request.headers)
+        allowed, retry = limiter.allow(who.user_id)
+        if not allowed:
+            raise HTTPException(
+                429, "rate limit exceeded", headers={"Retry-After": str(int(retry) + 1)}
+            )
+        return who
 
     def as_of(value: datetime | None = None) -> datetime:
         if value is not None:
@@ -141,6 +200,19 @@ def create_app(platform: Platform) -> FastAPI:
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(STATIC / "index.html")
+
+    @app.get("/api/whoami")
+    def whoami(p: Principal = Depends(principal)) -> JSONResponse:
+        return _json(
+            {
+                "user": p.user_id,
+                "roles": sorted(r.value for r in p.roles),
+                "desks": sorted(p.desks),
+                "person_data": p.person_data,
+                "auth_mode": auth.mode,
+                "environment": cfg.string("security", "environment"),
+            }
+        )
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:

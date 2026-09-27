@@ -247,7 +247,46 @@ initial_bulk_scopes = [
 ]
 
 [security]
-dev_auth = true                  # header-based principals for local use; put OIDC in front in production
+environment = "dev"              # dev | prod. prod refuses to start with insecure settings
+mode = "dev"                     # dev (X-User headers, local only) | proxy | oidc (docs/security.md)
+rate_limit_per_minute = 600      # per authenticated principal, per process
+max_body_bytes = 1048576
+person_data_groups = ["ASAS-PERSON-DATA"]
+
+[security.role_map]              # directory group -> ASAS role (no mapped role = no access)
+ASAS-VIEWERS = "viewer"
+ASAS-ANALYSTS = "investigator"
+ASAS-APPROVERS = "approver"
+ASAS-ADMINS = "admin"
+
+[security.desk_map]              # directory group -> desk entitlement ("*" = every desk)
+ASAS-DESK-ALL = "*"
+ASAS-DESK-EQ = "EQ"
+ASAS-DESK-FX = "FX"
+ASAS-DESK-RATES = "RATES"
+
+[security.proxy]                 # identity forwarded by an authenticating reverse proxy
+secret_env = "ASAS_PROXY_SECRET"
+secret_header = "X-ASAS-Proxy-Secret"
+user_header = "X-Forwarded-User"
+groups_header = "X-Forwarded-Groups"
+
+[security.oidc]                  # bearer JWTs from the identity provider, verified via JWKS
+issuer = "https://login.example-bank.internal/realms/surveillance"
+audience = "asas"
+jwks_url = "https://login.example-bank.internal/realms/surveillance/protocol/openid-connect/certs"
+algorithms = ["RS256"]
+user_claim = "preferred_username"
+groups_claim = "groups"
+leeway_seconds = 30
+token_header = "Authorization"
+
+[audit]
+anchor_dir = ""                  # external write-once location for signed chain heads ("" = off)
+anchor_every_run = true          # anchor after every pipeline run when anchor_dir is set
+signing = "ed25519"              # ed25519 (recommended: verifiers need only the public key) | hmac
+key_env = "ASAS_AUDIT_SIGNING_KEY"        # PEM private key (ed25519) or secret (hmac)
+public_key_env = "ASAS_AUDIT_PUBLIC_KEY"  # PEM public key for verification-only hosts
 
 [agents]
 enabled = false                  # true + a reachable endpoint = LLM policy; false = deterministic playbook
