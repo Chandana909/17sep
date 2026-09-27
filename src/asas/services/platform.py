@@ -9,6 +9,7 @@ link confirmation, human outcomes and curation, governed release. Every step is 
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -215,8 +216,12 @@ class Platform:
     ) -> None:
         self.cfg = cfg
         self.context = context or load_context()
-        self.database_url = str(store_path)
-        self.store = Store(store_path)
+        self.store = Store(
+            store_path,
+            reader_url=os.environ.get(cfg.string("storage", "reader_url_env")) or None,
+            auto_migrate=cfg.boolean("storage", "auto_migrate"),
+        )
+        self.database_url = self.store.url
         self.tracer = tracer or Tracer([StoreSpanExporter(self.store)])
         self.governance = Governance(self.store, cfg)
         self.ops = Ops(self.store)

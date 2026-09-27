@@ -250,7 +250,7 @@ def _rebuild_chain(db: Path, seq: int) -> None:
 def test_anchors_detect_a_consistently_rebuilt_history(demo: DemoResult, tmp_path: Path) -> None:
     db = tmp_path / "copy.db"
     with demo.platform.store.reader() as live, sqlite3.connect(db) as copy:
-        live.backup(copy)  # consistent online copy; the session store stays open
+        live.raw.backup(copy)  # consistent online copy; the session store stays open
     private, _ = generate_ed25519_keypair()
     signer = Ed25519Signer(private)
     sink = FileAnchorSink(tmp_path / "anchors")

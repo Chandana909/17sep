@@ -1,14 +1,17 @@
-"""SQLite store (Postgres-portable SQL). Every table is append-only, enforced by triggers.
+"""The ASAS store: append-only, point-in-time, on SQLite or PostgreSQL.
 
-Writers use a short-lived read-write connection under a process lock; everything an agent
-tool can reach goes through `reader()`, a `mode=ro` + `query_only` connection (rail 13).
+`Store(target)` takes a file path / `sqlite:///path` (single node) or a
+`postgresql://...` URL (production). The schema comes from versioned migrations
+(store/migrations.py); every table is append-only at the database level. Writers share one
+connection under a process lock. Everything an agent tool can reach goes through `reader()`,
+a read-only connection (SQLite `mode=ro` + `query_only`; Postgres
+`default_transaction_read_only`, optionally a SELECT-only role via `reader_url`).
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
-import threading
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -17,7 +20,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from asas.core.errors import DataContractError, ImmutableRecordError
+from asas.core.errors import DataContractError, DuplicateKeyError, ImmutableRecordError
 from asas.core.ids import canonical_json, content_hash
 from asas.data.ingest import SourceBundle
 from asas.domain.models import (
@@ -28,80 +31,22 @@ from asas.domain.models import (
     TradeEvent,
     TradePerson,
 )
+from asas.store.dialect import Conn, SqliteDialect, open_dialect
+from asas.store.migrations import APPEND_ONLY, MigrationError, migrate, pending
 
-SCHEMA_VERSION = 1
 M = TypeVar("M", bound=BaseModel)
-
-_TABLES = """
-CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS trade_events (
-  trade_id TEXT NOT NULL, version INTEGER NOT NULL, record_ts TEXT NOT NULL,
-  payload TEXT NOT NULL, payload_hash TEXT NOT NULL, PRIMARY KEY (trade_id, version));
-CREATE TABLE IF NOT EXISTS trade_persons (
-  trade_id TEXT PRIMARY KEY, record_ts TEXT NOT NULL, payload TEXT NOT NULL,
-  payload_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS alerts (
-  alert_id TEXT PRIMARY KEY, record_ts TEXT NOT NULL, payload TEXT NOT NULL,
-  payload_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS alert_annexes (
-  alert_id TEXT PRIMARY KEY, record_ts TEXT NOT NULL, payload TEXT NOT NULL,
-  payload_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS rfi_events (
-  event_key TEXT PRIMARY KEY, record_ts TEXT NOT NULL, payload TEXT NOT NULL,
-  payload_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS outcomes (
-  outcome_id TEXT PRIMARY KEY, record_ts TEXT NOT NULL, payload TEXT NOT NULL,
-  payload_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS artifacts (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, key TEXT NOT NULL,
-  version TEXT NOT NULL, created_at TEXT NOT NULL, payload TEXT NOT NULL,
-  payload_hash TEXT NOT NULL, UNIQUE (kind, key, version));
-CREATE INDEX IF NOT EXISTS artifacts_kind_key ON artifacts (kind, key, seq);
-CREATE TABLE IF NOT EXISTS agent_runs (
-  run_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL, agent TEXT NOT NULL,
-  subject TEXT NOT NULL, manifest TEXT NOT NULL, started_at TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS agent_runs_key ON agent_runs (idempotency_key);
-CREATE TABLE IF NOT EXISTS agent_run_results (
-  run_id TEXT PRIMARY KEY, status TEXT NOT NULL, finished_at TEXT NOT NULL,
-  result TEXT NOT NULL, result_hash TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agent_steps (
-  run_id TEXT NOT NULL, step INTEGER NOT NULL, policy TEXT NOT NULL, action TEXT NOT NULL,
-  observation TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
-  PRIMARY KEY (run_id, step));
-CREATE TABLE IF NOT EXISTS tool_calls (
-  call_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, step INTEGER NOT NULL, tool TEXT NOT NULL,
-  args TEXT NOT NULL, result TEXT NOT NULL, result_hash TEXT NOT NULL, cached INTEGER NOT NULL,
-  duration_ms INTEGER NOT NULL, error TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS model_cache (
-  request_hash TEXT PRIMARY KEY, model_id TEXT NOT NULL, response TEXT NOT NULL,
-  created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS spans (
-  span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT, name TEXT NOT NULL,
-  start_ns INTEGER NOT NULL, end_ns INTEGER NOT NULL, status TEXT NOT NULL,
-  attributes TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS audit_log (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, actor TEXT NOT NULL,
-  action TEXT NOT NULL, subject TEXT NOT NULL, detail TEXT NOT NULL, prev_hash TEXT NOT NULL,
-  hash TEXT NOT NULL);
-"""
-
-APPEND_ONLY = (
-    "trade_events",
-    "trade_persons",
-    "alerts",
-    "alert_annexes",
-    "rfi_events",
-    "outcomes",
-    "artifacts",
-    "agent_runs",
-    "agent_run_results",
-    "agent_steps",
-    "tool_calls",
-    "model_cache",
-    "spans",
-    "audit_log",
-)
 GENESIS = "0" * 64
+__all__ = ["APPEND_ONLY", "GENESIS", "Store", "ts_key", "utcnow"]
+
+# key columns per source table: portable deterministic order within one record time
+_SOURCE_KEYS = {
+    "trade_events": "trade_id, version",
+    "trade_persons": "trade_id",
+    "alerts": "alert_id",
+    "alert_annexes": "alert_id",
+    "rfi_events": "event_key",
+    "outcomes": "outcome_id",
+}
 
 
 def ts_key(value: datetime) -> str:
@@ -114,62 +59,53 @@ def utcnow() -> datetime:
 
 
 class Store:
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+    def __init__(
+        self, target: str | Path, reader_url: str | None = None, auto_migrate: bool = True
+    ) -> None:
+        """`auto_migrate=False` is for production application roles: the schema is migrated
+        by the owner role (`asas migrate`), and start-up only verifies it is current."""
+        self.dialect = open_dialect(target, reader_url)
+        self.url = self.dialect.url
+        self.path = self.dialect.path if isinstance(self.dialect, SqliteDialect) else None
+        self.applied_migrations: list[int] = []
         with self.writer() as conn:
-            conn.executescript(_TABLES)
-            for table in APPEND_ONLY:
-                for op in ("UPDATE", "DELETE"):
-                    conn.execute(
-                        f"CREATE TRIGGER IF NOT EXISTS {table}_no_{op.lower()} BEFORE {op} "
-                        f"ON {table} BEGIN SELECT RAISE(ABORT, 'append-only table'); END"
+            if auto_migrate:
+                self.applied_migrations = migrate(conn, self.dialect.name, ts_key(utcnow()))
+            else:
+                todo = pending(conn, self.dialect.name)
+                if todo:
+                    raise MigrationError(
+                        f"database schema is behind by {len(todo)} migration(s); "
+                        "run `python -m asas migrate --db <owner url>`"
                     )
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_version VALUES (?, ?)",
-                (SCHEMA_VERSION, ts_key(utcnow())),
-            )
 
     # ------------------------------------------------------------ connections
 
     @contextmanager
-    def writer(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            conn = self._conn
-            try:
-                yield conn
-                conn.commit()
-            except sqlite3.IntegrityError as exc:
-                conn.rollback()
-                if "append-only" in str(exc):
-                    raise ImmutableRecordError(str(exc)) from exc
-                raise
-            except Exception:
-                conn.rollback()
-                raise
-
-    def close(self) -> None:
-        with self._lock:
-            self._conn.close()
+    def writer(self) -> Iterator[Conn]:
+        with self.dialect.writer() as conn:
+            yield conn
 
     @contextmanager
-    def reader(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
-        conn.execute("PRAGMA query_only = ON")
-        try:
+    def reader(self) -> Iterator[Conn]:
+        with self.dialect.reader() as conn:
             yield conn
-        finally:
-            conn.close()
+
+    def close(self) -> None:
+        self.dialect.close()
 
     # ------------------------------------------------------------ source snapshots
 
     def ingest(self, bundle: SourceBundle) -> dict[str, int]:
         """Idempotent append. Re-sending an identical row is a no-op; a changed row with the
-        same key is rejected: sources are bitemporal, corrections arrive as new versions."""
+        same key is rejected: sources are bitemporal, corrections arrive as new versions.
+        If a concurrent ingest wins a key race, the whole (idempotent) ingest is retried."""
+        try:
+            return self._ingest(bundle)
+        except DuplicateKeyError:
+            return self._ingest(bundle)
+
+    def _ingest(self, bundle: SourceBundle) -> dict[str, int]:
         counts: dict[str, int] = {}
         with self.writer() as conn:
             counts["trade_events"] = self._append(
@@ -215,7 +151,7 @@ class Store:
 
     @staticmethod
     def _append(
-        conn: sqlite3.Connection,
+        conn: Conn,
         table: str,
         key_cols: tuple[str, ...],
         rows: list[tuple[tuple[Any, ...], datetime, BaseModel]],
@@ -244,17 +180,18 @@ class Store:
         return added
 
     def load_bundle(self, as_of: datetime) -> SourceBundle:
-        """Point-in-time read (rail 10): nothing recorded after `as_of` is returned."""
+        """Point-in-time read (rail 8): nothing recorded after `as_of` is returned."""
         cut = ts_key(as_of)
         with self.reader() as conn:
 
             def rows(table: str, model: type[M], strict_before: bool = False) -> tuple[M, ...]:
                 op = "<" if strict_before else "<="
                 cur = conn.execute(
-                    f"SELECT payload FROM {table} WHERE record_ts {op} ? ORDER BY record_ts, rowid",
+                    f"SELECT payload FROM {table} WHERE record_ts {op} ? "
+                    f"ORDER BY record_ts, {_SOURCE_KEYS[table]}",
                     (cut,),
                 )
-                return tuple(model.model_validate_json(r[0]) for r in cur)
+                return tuple(model.model_validate_json(r[0]) for r in cur.fetchall())
 
             return SourceBundle(
                 trade_events=rows("trade_events", TradeEvent),
@@ -269,7 +206,7 @@ class Store:
         with self.reader() as conn:
             row = conn.execute(
                 "SELECT MAX(record_ts) FROM (SELECT record_ts FROM trade_events "
-                "UNION ALL SELECT record_ts FROM alerts)"
+                "UNION ALL SELECT record_ts FROM alerts) AS records"
             ).fetchone()
         if not row or row[0] is None:
             return None
@@ -280,6 +217,12 @@ class Store:
     def put_artifact(self, kind: str, key: str, version: str, obj: Any) -> str:
         payload = obj.model_dump_json() if isinstance(obj, BaseModel) else canonical_json(obj)
         digest = content_hash(payload)
+        try:
+            return self._put_artifact(kind, key, version, payload, digest)
+        except DuplicateKeyError:  # another process wrote this version first: re-check
+            return self._put_artifact(kind, key, version, payload, digest)
+
+    def _put_artifact(self, kind: str, key: str, version: str, payload: str, digest: str) -> str:
         with self.writer() as conn:
             row = conn.execute(
                 "SELECT payload_hash FROM artifacts WHERE kind=? AND key=? AND version=?",
@@ -300,7 +243,8 @@ class Store:
         """Point `kind/latest` at `obj`. The pointer is an append-only history: every call
         becomes the newest entry, even when identical content was latest before, so
         re-running an earlier run (e.g. after safe mode is lifted) re-points to it."""
-        return self.put_artifact(kind, "latest", f"{ts_key(utcnow())}|{version}", obj)
+        unique = f"{ts_key(utcnow())}|{uuid.uuid4().hex[:12]}|{version}"  # clocks can tie
+        return self.put_artifact(kind, "latest", unique, obj)
 
     def get_artifact(self, kind: str, key: str, version: str | None = None) -> str | None:
         with self.reader() as conn:
@@ -332,7 +276,7 @@ class Store:
                 ") m ON a.seq = m.seq ORDER BY a.key",
                 (kind,),
             )
-            return [(str(r[0]), str(r[1]), str(r[2])) for r in cur]
+            return [(str(r[0]), str(r[1]), str(r[2])) for r in cur.fetchall()]
 
     def artifact_history(self, kind: str, key: str) -> list[tuple[str, str, str]]:
         with self.reader() as conn:
@@ -341,12 +285,13 @@ class Store:
                 "ORDER BY seq",
                 (kind, key),
             )
-            return [(str(r[0]), str(r[1]), str(r[2])) for r in cur]
+            return [(str(r[0]), str(r[1]), str(r[2])) for r in cur.fetchall()]
 
     # ------------------------------------------------------------ audit chain
 
     def audit(self, actor: str, action: str, subject: str, detail: dict[str, Any]) -> str:
         with self.writer() as conn:
+            self.dialect.lock_audit_chain(conn)
             row = conn.execute("SELECT hash FROM audit_log ORDER BY seq DESC LIMIT 1").fetchone()
             prev = row[0] if row else GENESIS
             at = ts_key(utcnow())
@@ -433,12 +378,8 @@ class Store:
             conn.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", tuple(row.values()))
 
     def insert_ignore(self, table: str, row: dict[str, Any]) -> None:
-        cols = ", ".join(row)
-        marks = ", ".join("?" for _ in row)
         with self.writer() as conn:
-            conn.execute(
-                f"INSERT OR IGNORE INTO {table} ({cols}) VALUES ({marks})", tuple(row.values())
-            )
+            conn.execute(self.dialect.insert_ignore(table, list(row)), tuple(row.values()))
 
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         if not sql.lstrip().upper().startswith("SELECT"):

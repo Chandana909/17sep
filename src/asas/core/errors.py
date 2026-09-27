@@ -51,3 +51,7 @@ class BudgetExceeded(AsasError):
 
 class ImmutableRecordError(AsasError):
     """An attempt was made to change an append-only record."""
+
+
+class DuplicateKeyError(AsasError):
+    """A concurrent writer inserted the same key first (callers re-check and continue)."""

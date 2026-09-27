@@ -89,6 +89,14 @@ def checks(cfg: Config, database_url: str = "") -> list[Check]:
     scheme = urlparse(database_url).scheme if "://" in database_url else "sqlite"
     if scheme.startswith("postgres"):
         out.append(Check("storage", "OK", "postgres"))
+        if cfg.boolean("storage", "auto_migrate"):
+            out.append(
+                Check(
+                    "migrations",
+                    "WARN" if prod else "OK",
+                    "auto_migrate on: the app role must own tables; prefer `asas migrate`",
+                )
+            )
     else:
         out.append(
             Check(

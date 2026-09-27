@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import sys
 from collections.abc import Sequence
 from datetime import datetime
@@ -189,6 +190,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """Run as the schema owner. The application role then starts with auto_migrate = false."""
+    store = Store(args.db, auto_migrate=True)
+    print(f"applied migrations: {store.applied_migrations or 'none (schema current)'}")
+    store.close()
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     results = readiness_checks(cfg, args.db or "")
@@ -283,7 +292,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def with_db(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        p.add_argument("--db", required=True, help="path of the ASAS store (SQLite)")
+        env = os.environ.get("ASAS_DATABASE_URL")
+        p.add_argument(
+            "--db",
+            default=env,
+            required=env is None,
+            help="SQLite path or postgresql:// URL (default: $ASAS_DATABASE_URL)",
+        )
         return p
 
     p = with_db(sub.add_parser("demo", help="run the full lifecycle on synthetic data"))
@@ -325,6 +340,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = with_db(sub.add_parser("verify-audit", help="verify the hash-chained audit log"))
     p.set_defaults(func=cmd_verify)
+
+    p = with_db(sub.add_parser("migrate", help="apply schema migrations (owner role)"))
+    p.set_defaults(func=cmd_migrate)
 
     p = sub.add_parser("doctor", help="production readiness checks (exit 1 on FAIL)")
     p.add_argument("--db", default="", help="database path or URL to check")
