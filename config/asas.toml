@@ -1,7 +1,7 @@
 # ASAS decision environment. Every threshold, tolerance, window, weight and limit lives here.
 # Decimals are strings (no float drift). Bump `version` on any change: it is stamped on every
 # run manifest, snapshot and policy decision. Missing decision keys fail safe.
-version = "asas-config-2.0.0"
+version = "asas-config-2.1.0"
 
 [pipeline]
 review_window_days = 30          # cases are opened for alerts in this window; older data is history
@@ -24,8 +24,85 @@ signature_max_tokens = 8
 min_peer_n = 15
 peer_levels = ["desk_product", "desk", "global"]
 mad_scale = "1.4826"
+meanad_scale = "1.253314"        # robust-z fallback when MAD is 0 (Iglewicz & Hoaglin)
 baseline_lookback_days = 60
 recurrence_window_days = 30
+
+[data]
+# Contract fields whose global coverage decides whether features that need them run at all.
+measure_fields = ["SIDE", "QUANTITY", "PRICE", "NOTIONAL_USD"]
+min_field_coverage = "0.5"       # below this share of non-null values the field is unavailable
+unavailable_fields = []          # business override: fields known to be unreliable at source
+
+[anomaly]
+# Verified deviation analysis (docs/anomaly-analysis.md). Signals are behavioural; size is a
+# severity amplifier (classification), not an anomaly on its own.
+version = "anomaly-1"
+signals = ["max_price_change_pct", "max_qty_change_pct", "n_amends", "booking_latency_hours_max",
+           "rebook_price_change_pct", "hours_first_amend", "book_signature_recurrence"]
+peer_levels = ["desk_product", "desk", "global"]
+self_level = "book"              # the episode's own book history
+screen_percentile = "95"
+screen_robust_z = "3.5"
+screen_mode = "all"              # all = percentile AND robust z must pass; any = either
+min_confirming_levels = 2        # peer levels (with n >= signals.min_peer_n) that must agree
+self_min_n = 8
+stability_shift_days = 30        # re-test against the reference window shifted this far back
+require_stability = false        # true: an untestable stability check blocks verification
+z_cap = "10"                     # robust z at which a signal's strength saturates
+joint_max_order = 3              # rare combinations of up to this many items
+joint_min_reference = 200
+joint_max_support = 0            # a combination seen at most this often in OTHER reference episodes
+joint_min_item_support = 5       # ... while each of its items is individually common
+joint_ignored_prefixes = ["desk="]
+joint_ignored_items = ["flag:lifecycle_valid"]
+band_high = "1.5"
+band_medium = "0.75"
+residual_escalation_band = "HIGH"  # unexplained deviation at or above this band -> escalation
+
+[anomaly.tails]                  # upper | lower | both (default upper)
+hours_first_amend = "upper"
+
+[anomaly.quality_exclusions]     # a deviation on these signals is not trusted with these flags
+max_price_change_pct = ["VERSION_GAP", "FIRST_EVENT_NOT_NEW", "EVENTS_AFTER_CANCEL"]
+max_qty_change_pct = ["VERSION_GAP", "FIRST_EVENT_NOT_NEW", "EVENTS_AFTER_CANCEL"]
+n_amends = ["VERSION_GAP", "EVENTS_AFTER_CANCEL"]
+hours_first_amend = ["VERSION_GAP", "FIRST_EVENT_NOT_NEW"]
+rebook_price_change_pct = ["DANGLING_ORIGINAL_TRADE_ID"]
+
+[anomaly.weights]
+peer_deviation = "1"
+breadth = "0.25"
+self_history = "0.25"
+joint_rarity = "0.5"
+
+[anomaly.explains]               # deviations a verified benign explanation accounts for
+PRICE_CORRECTION = ["max_price_change_pct", "hours_first_amend", "n_amends", "joint"]
+CANCEL_REBOOK_CORRECTION = ["rebook_price_change_pct", "book_signature_recurrence", "joint"]
+ROUTINE_EXECUTION = ["joint"]
+LATE_BOOKING_OPERATIONAL = ["booking_latency_hours_max", "joint"]
+
+[classification]
+confidence_high = 3              # independent lines of evidence for HIGH confidence
+confidence_medium = 2
+materiality_bump = true          # notional above scoring.materiality_usd raises severity a level
+levels = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+[classification.severity]
+PERIOD_END_ROUND_TRIP = "HIGH"
+OFF_MARKET_AMENDMENT = "HIGH"
+REBOOK_ECONOMICS_CHANGED = "HIGH"
+VERIFIED_PEER_DEVIATION = "MEDIUM"
+CANCEL_REBOOK_CORRECTION = "LOW"
+PRICE_CORRECTION = "LOW"
+LATE_BOOKING_OPERATIONAL = "MEDIUM"
+ROUTINE_EXECUTION = "LOW"
+UNRESOLVED = "MEDIUM"
+
+[classification.typology_signals]  # signals whose verified deviation corroborates a typology
+PERIOD_END_ROUND_TRIP = ["max_price_change_pct", "n_amends"]
+OFF_MARKET_AMENDMENT = ["max_price_change_pct", "hours_first_amend"]
+REBOOK_ECONOMICS_CHANGED = ["rebook_price_change_pct", "book_signature_recurrence"]
 
 [scoring]
 outlier_percentile = "95"
@@ -49,6 +126,7 @@ outliers = "2"
 rarity = "1"
 materiality = "1"
 data_quality = "0.5"
+outlyingness = "0.5"             # verified deviation strength (anomaly.*), before explanation
 
 [scoring.rule_severity]
 R100 = "MEDIUM"
@@ -106,7 +184,8 @@ cohort_max_size = 50
 redundancy_min_alerts = 2
 exposure_rules = ["R400"]
 sampling_rules = ["R900"]
-max_findings_per_run = 40
+max_findings_per_run = 40         # redundancy / alternative-explanation / missing-context
+max_blind_spots_per_run = 40      # blind spots are examined first, most outlying first
 
 [discovery]
 min_support = 8
@@ -128,6 +207,8 @@ max_redundant_coverage = "0.8"   # skip a risk pattern an earlier proposal alrea
 max_price_change_pct = ["0.2", "1", "3.5"]
 booking_latency_hours_max = ["1", "4"]
 notional_usd_max = ["1000000", "5000000"]
+max_qty_change_pct = ["1", "25", "100"]
+n_amends = ["1", "2", "4"]
 
 [replay]
 evaluation_delay_hours = 24
@@ -183,8 +264,8 @@ max_model_calls = 30
 max_seconds = 120
 
 [agents.budgets.challenger]
-max_steps = 200
-max_tool_calls = 150
+max_steps = 400
+max_tool_calls = 300
 max_model_calls = 60
 max_seconds = 300
 

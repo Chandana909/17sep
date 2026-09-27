@@ -232,6 +232,7 @@ def test_score_is_a_sum_of_named_components(cfg: Config, dataset: SyntheticDatas
             "rarity",
             "materiality",
             "data_quality",
+            "outlyingness",
         }
 
 

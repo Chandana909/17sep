@@ -2,7 +2,13 @@
 
 Agents choose which hypotheses to pursue and which evidence to fetch. Whether a hypothesis
 is SUPPORTED, CONTRADICTED or INSUFFICIENT is decided here, from tool outputs only. Absence
-of contradiction is never confirmation: a missing fact yields INSUFFICIENT.
+of contradiction is never confirmation: a missing fact yields INSUFFICIENT, and so does a
+hypothesis whose contract fields the data does not carry (`fields` vs data capabilities).
+
+VERIFIED_PEER_DEVIATION is the residual hypothesis: it is SUPPORTED when the episode has
+verified deviations (engine/deviation.py). Adjudication subtracts the deviations that a
+SUPPORTED benign explanation accounts for (`anomaly.explains`); whatever remains is
+unexplained, and an unexplained verified deviation can never be proposed for bulk review.
 """
 
 from __future__ import annotations
@@ -59,6 +65,7 @@ EVIDENCE_FUNCTIONS: Mapping[str, EvidenceFn] = {
     "get_prior_outcomes": lambda s, a, p: ev.prior_outcomes(s, a["episode_id"]),
     "get_rule": lambda s, a, p: ev.rule_view(s, a["rule_id"]),
     "compare_trades": lambda s, a, p: ev.compare_trades(s, a["trade_a"], a["trade_b"]),
+    "get_deviation_profile": lambda s, a, p: ev.deviation_view(s, a["episode_id"]),
 }
 
 
@@ -98,12 +105,14 @@ class Evaluation:
     supporting: list[str] = field(default_factory=list)
     contradicting: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    signals: list[str] = field(default_factory=list)  # verified deviations (residual only)
 
 
 @dataclass(frozen=True)
 class Subject:
     episode: ev.EpisodeView
     verified_links: tuple[tuple[str, str], ...]  # (cancelled trade, rebook trade)
+    unavailable: frozenset[str] = frozenset()  # contract fields the data does not support
 
     def signal(self, name: str) -> str | None:
         return self.episode.signals.get(name)
@@ -139,6 +148,8 @@ class HypothesisDef:
     applies: Applies
     requirements: Requirements
     evaluate: Evaluator
+    fields: frozenset[str] = frozenset()  # optional contract fields the evaluator relies on
+    residual: bool = False  # deviation-based: judged after benign explanations are applied
 
 
 def _p(cfg: Config, name: str) -> Decimal:
@@ -403,11 +414,34 @@ def _reprice_eval(s: Subject, bag: EvidenceBag, cfg: Config) -> Evaluation:
     return Evaluation(HypothesisStatus.CONTRADICTED, contradicting=["rebooks preserve economics"])
 
 
-# ---- RECURRING_BENIGN_CONTEXT
+# ---- VERIFIED_PEER_DEVIATION (residual)
 
 
 def _always(_s: Subject, _cfg: Config) -> bool:
     return True
+
+
+def _deviation_requires(s: Subject, _cfg: Config) -> list[ToolRequest]:
+    return [ToolRequest.of("get_deviation_profile", episode_id=s.episode.episode_id)]
+
+
+def _deviation_eval(s: Subject, bag: EvidenceBag, cfg: Config) -> Evaluation:
+    view = need(bag, _deviation_requires(s, cfg)[0], ev.DeviationView)
+    if not view.available:
+        return Evaluation(HypothesisStatus.INSUFFICIENT, missing=["peer_baseline"])
+    if not view.verified:
+        return Evaluation(
+            HypothesisStatus.CONTRADICTED,
+            contradicting=[f"no verified deviation across {len(view.screened)} screened signals"],
+        )
+    return Evaluation(
+        HypothesisStatus.SUPPORTED,
+        supporting=[view.summaries.get(v, v) for v in view.verified],
+        signals=list(view.verified),
+    )
+
+
+# ---- RECURRING_BENIGN_CONTEXT
 
 
 def _context_requires(s: Subject, _cfg: Config) -> list[ToolRequest]:
@@ -431,6 +465,9 @@ def _context_eval(s: Subject, bag: EvidenceBag, cfg: Config) -> Evaluation:
     return Evaluation(HypothesisStatus.INSUFFICIENT, missing=["curated_history_for_pattern"])
 
 
+_PRICE = frozenset({"PRICE"})
+_ECONOMICS = frozenset({"PRICE", "QUANTITY", "SIDE"})
+
 CATALOG: tuple[HypothesisDef, ...] = (
     HypothesisDef(
         "PERIOD_END_ROUND_TRIP",
@@ -439,6 +476,7 @@ CATALOG: tuple[HypothesisDef, ...] = (
         _round_trip_applies,
         _versions_needed,
         _round_trip_eval,
+        fields=_PRICE,
     ),
     HypothesisDef(
         "OFF_MARKET_AMENDMENT",
@@ -447,6 +485,7 @@ CATALOG: tuple[HypothesisDef, ...] = (
         _amend_applies,
         _off_market_requires,
         _off_market_eval,
+        fields=_PRICE,
     ),
     HypothesisDef(
         "REBOOK_ECONOMICS_CHANGED",
@@ -455,6 +494,16 @@ CATALOG: tuple[HypothesisDef, ...] = (
         _cancel_applies,
         _reprice_requires,
         _reprice_eval,
+        fields=_PRICE,
+    ),
+    HypothesisDef(
+        "VERIFIED_PEER_DEVIATION",
+        HypothesisClass.ANOMALOUS,
+        "behaviour deviates from peers in a verified way that no benign explanation covers",
+        _always,
+        _deviation_requires,
+        _deviation_eval,
+        residual=True,
     ),
     HypothesisDef(
         "CANCEL_REBOOK_CORRECTION",
@@ -463,6 +512,7 @@ CATALOG: tuple[HypothesisDef, ...] = (
         _cancel_applies,
         _rebook_requires,
         _rebook_eval,
+        fields=_ECONOMICS,
     ),
     HypothesisDef(
         "PRICE_CORRECTION",
@@ -471,6 +521,7 @@ CATALOG: tuple[HypothesisDef, ...] = (
         _amend_applies,
         _versions_needed,
         _price_correction_eval,
+        fields=_ECONOMICS,
     ),
     HypothesisDef(
         "LATE_BOOKING_OPERATIONAL",
@@ -487,6 +538,7 @@ CATALOG: tuple[HypothesisDef, ...] = (
         _routine_applies,
         _routine_requires,
         _routine_eval,
+        fields=frozenset({"NOTIONAL_USD"}),
     ),
     HypothesisDef(
         "RECURRING_BENIGN_CONTEXT",
@@ -498,7 +550,7 @@ CATALOG: tuple[HypothesisDef, ...] = (
     ),
 )
 CATALOG_BY_TYPE: Mapping[str, HypothesisDef] = {h.type: h for h in CATALOG}
-CATALOG_VERSION = "hypotheses-1"
+CATALOG_VERSION = "hypotheses-2"
 
 
 def applicable(subject: Subject, cfg: Config) -> list[HypothesisDef]:
@@ -516,6 +568,11 @@ def evaluate(h: HypothesisDef, subject: Subject, bag: EvidenceBag, cfg: Config) 
         return Evaluation(
             HypothesisStatus.CONTRADICTED, contradicting=[f"preconditions not met: {h.description}"]
         )
+    unavailable = sorted(h.fields & subject.unavailable)
+    if unavailable:
+        return Evaluation(
+            HypothesisStatus.INSUFFICIENT, missing=[f"FIELD_UNAVAILABLE:{f}" for f in unavailable]
+        )
     missing = missing_requests(h, subject, bag, cfg)
     if missing:
         return Evaluation(HypothesisStatus.INSUFFICIENT, missing=[r.key for r in missing])
@@ -530,9 +587,48 @@ class Adjudication:
     missing: tuple[str, ...]
     contradicted: tuple[str, ...]
     history_adverse: bool
+    unexplained: tuple[str, ...] = ()  # verified deviations no benign explanation covers
+    explained: tuple[str, ...] = ()  # covered by a SUPPORTED benign explanation
+    pending: tuple[str, ...] = ()  # would be covered by a benign explanation lacking evidence
 
 
-def adjudicate(results: Sequence[tuple[HypothesisDef, Evaluation]]) -> Adjudication:
+def explains_map(cfg: Config) -> dict[str, frozenset[str]]:
+    return {k: frozenset(v) for k, v in cfg.section("anomaly", "explains").items()}
+
+
+def _deviation_split(
+    ranked: Sequence[tuple[HypothesisDef, Evaluation]], covers: Mapping[str, frozenset[str]]
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """(unexplained, explained, pending) verified deviations of the residual hypothesis."""
+    deviating = sorted(
+        {
+            sig
+            for h, e in ranked
+            if h.residual and e.status is HypothesisStatus.SUPPORTED
+            for sig in e.signals
+        }
+    )
+    covered: set[str] = set()
+    could: set[str] = set()
+    for h, e in ranked:
+        if h.klass is not HypothesisClass.BENIGN:
+            continue
+        if e.status is HypothesisStatus.SUPPORTED:
+            covered |= covers.get(h.type, frozenset())
+        elif e.status is HypothesisStatus.INSUFFICIENT:
+            could |= covers.get(h.type, frozenset())
+    explained = tuple(d for d in deviating if d in covered)
+    pending = tuple(d for d in deviating if d not in covered and d in could)
+    unexplained = tuple(d for d in deviating if d not in covered and d not in could)
+    return unexplained, explained, pending
+
+
+def adjudicate(
+    results: Sequence[tuple[HypothesisDef, Evaluation]],
+    explains: Mapping[str, frozenset[str]] | None = None,
+) -> Adjudication:
+    """Typed anomaly > unexplained verified deviation > benign (only with nothing missing) >
+    abstain. Deterministic and independent of the order of `results`."""
     order = {h.type: i for i, h in enumerate(CATALOG)}
     ranked = sorted(results, key=lambda r: order[r[0].type])
     supported = [h for h, e in ranked if e.status is HypothesisStatus.SUPPORTED]
@@ -545,11 +641,32 @@ def adjudicate(results: Sequence[tuple[HypothesisDef, Evaluation]]) -> Adjudicat
         h.klass is HypothesisClass.CONTEXT and e.status is HypothesisStatus.CONTRADICTED
         for h, e in ranked
     )
-    anomalous = [h for h in supported if h.klass is HypothesisClass.ANOMALOUS]
-    if anomalous:
+    unexplained, explained, pending = _deviation_split(ranked, explains or {})
+
+    def result(
+        conclusion: str | None,
+        klass: HypothesisClass | None,
+        reason: str | None,
+        missing: tuple[str, ...] = (),
+    ) -> Adjudication:
         return Adjudication(
-            anomalous[0].type, HypothesisClass.ANOMALOUS, None, (), contradicted, history_adverse
+            conclusion,
+            klass,
+            reason,
+            missing,
+            contradicted,
+            history_adverse,
+            unexplained,
+            explained,
+            pending,
         )
+
+    typed = [h for h in supported if h.klass is HypothesisClass.ANOMALOUS and not h.residual]
+    if typed:
+        return result(typed[0].type, HypothesisClass.ANOMALOUS, None)
+    if unexplained:
+        residual = next(h for h in supported if h.residual)
+        return result(residual.type, HypothesisClass.ANOMALOUS, None)
     insufficient = [
         (h, e)
         for h, e in ranked
@@ -558,14 +675,10 @@ def adjudicate(results: Sequence[tuple[HypothesisDef, Evaluation]]) -> Adjudicat
     missing = tuple(sorted({m for _, e in insufficient for m in e.missing}))
     benign = [h for h in supported if h.klass is HypothesisClass.BENIGN]
     if benign and not insufficient:
-        return Adjudication(
-            benign[0].type, HypothesisClass.BENIGN, None, (), contradicted, history_adverse
-        )
+        return result(benign[0].type, HypothesisClass.BENIGN, None)
     if insufficient:
-        return Adjudication(
-            None, None, "INSUFFICIENT_EVIDENCE", missing, contradicted, history_adverse
-        )
-    return Adjudication(None, None, "NO_SUPPORTED_EXPLANATION", (), contradicted, history_adverse)
+        return result(None, None, "INSUFFICIENT_EVIDENCE", missing)
+    return result(None, None, "NO_SUPPORTED_EXPLANATION")
 
 
 @dataclass(frozen=True)
@@ -585,12 +698,14 @@ def assess(snap: Snapshot, episode_id: str, principal: Principal) -> Assessment:
     bag = EvidenceBag()
     episode = ev.episode_view(snap, episode_id)
     pairs = tuple(sorted(ev.verified_link_ids(snap)))
-    subject = Subject(episode, pairs)
+    subject = Subject(episode, pairs, snap.capabilities.unavailable)
     results: list[tuple[HypothesisDef, Evaluation]] = []
     for h in applicable(subject, snap.cfg):
         for req in missing_requests(h, subject, bag, snap.cfg):
             bag.add(req, run_request(snap, req, principal))
         results.append((h, evaluate(h, subject, bag, snap.cfg)))
     return Assessment(
-        episode_id, tuple((h.type, e.status) for h, e in results), adjudicate(results)
+        episode_id,
+        tuple((h.type, e.status) for h, e in results),
+        adjudicate(results, explains_map(snap.cfg)),
     )

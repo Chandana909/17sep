@@ -1,0 +1,232 @@
+# Business context catalogue: the plain-language meaning of everything ASAS decides or shows.
+#
+# Presentation and reviewer guidance only. It never changes a decision: thresholds live in
+# asas.toml, typologies in engine/hypotheses.py. When the business adds a hypothesis, a signal,
+# a rule or a reason code, add its entry here; tests/test_context.py fails until you do.
+# The wording is a DRAFT for Surveillance Compliance to own and approve; bump `version` on edits.
+version = "context-1"
+owner = "Surveillance Compliance (draft wording, pending approval)"
+
+# ---------------------------------------------------------------- hypotheses / typologies
+
+[hypotheses.PERIOD_END_ROUND_TRIP]
+title = "Period-end round trip"
+risk_theme = "Mismarking / window dressing"
+meaning = "A trade price was moved shortly before a month end and restored shortly after it."
+why_it_matters = "Temporarily moving a booked price across a reporting date can overstate P&L, positions or limits for that date and is a classic window-dressing pattern."
+reviewer_checks = [
+  "Compare each version's price with the market price at the amendment time.",
+  "Quantify the P&L and limit effect at the period end.",
+  "Ask who requested both amendments and why the price was restored.",
+]
+
+[hypotheses.OFF_MARKET_AMENDMENT]
+title = "Off-market amendment"
+risk_theme = "Off-market pricing / client detriment"
+meaning = "An amendment moved the price far outside the range of comparable amendments by peers."
+why_it_matters = "Large unexplained price changes after execution can shift value between the firm, clients or books and may indicate mismarking or favouritism."
+reviewer_checks = [
+  "Obtain the market price at execution and at amendment.",
+  "Check the client confirmation and any written instruction.",
+  "Check whether the counterparty or book benefited.",
+]
+
+[hypotheses.REBOOK_ECONOMICS_CHANGED]
+title = "Rebook changed economics"
+risk_theme = "Concealment / repricing"
+meaning = "A trade was cancelled and rebooked as a correction, but the rebook changed the price."
+why_it_matters = "Cancel-and-rebook is a normal correction route; using it to change economics bypasses amendment controls, and repeated use in one book is a churn signal."
+reviewer_checks = [
+  "Confirm the reason for the rebook with operations.",
+  "Compare the rebook price with the market at rebook time.",
+  "Review other cancel/rebooks in the same book over the recurrence window.",
+]
+
+[hypotheses.VERIFIED_PEER_DEVIATION]
+title = "Unexplained verified deviation"
+risk_theme = "Unusual behaviour without a catalogued explanation"
+meaning = "The episode deviates from its peers in a verified way (several peer groups agree, stable over time, clean data) and no verified benign explanation accounts for it."
+why_it_matters = "This is how new misconduct patterns surface before a rule or typology exists for them. It is prioritised for review and, if it recurs, discovery proposes a governed rule."
+reviewer_checks = [
+  "Read the deviation table: which behaviour, versus which peers, how extreme.",
+  "Look for a business reason that a new benign hypothesis could verify.",
+  "If it is a new pattern, raise it so discovery and governance can address it.",
+]
+
+[hypotheses.CANCEL_REBOOK_CORRECTION]
+title = "Cancel and rebook correction"
+risk_theme = "Operational correction (benign)"
+meaning = "The trade was cancelled and promptly rebooked with identical economics."
+why_it_matters = "A like-for-like rebook corrects static data or booking details without changing exposure or value."
+reviewer_checks = ["Confirm the rebook is linked and economically identical (the evidence shows each comparison)."]
+
+[hypotheses.PRICE_CORRECTION]
+title = "Price correction"
+risk_theme = "Operational correction (benign)"
+meaning = "A prompt, bounded, price-only fix of a booking error, not crossing a period end."
+why_it_matters = "Typo corrections are frequent and benign when they are fast, small and change nothing but the price."
+reviewer_checks = ["Confirm the corrected price matches the execution record."]
+
+[hypotheses.LATE_BOOKING_OPERATIONAL]
+title = "Late booking (operational)"
+risk_theme = "Books and records timeliness"
+meaning = "The trade was recorded hours after execution; the operational reason cannot be verified from trade data."
+why_it_matters = "Late bookings can hide positions or allow backdating; ASAS never assumes an innocent reason it cannot verify."
+reviewer_checks = [
+  "Obtain the execution timestamp from the source of record.",
+  "Obtain the incident or outage reference if one is claimed.",
+]
+
+[hypotheses.ROUTINE_EXECUTION]
+title = "Routine execution"
+risk_theme = "Normal activity (benign)"
+meaning = "A single, timely booking with no unexplained outlier."
+why_it_matters = "Most alerts on plain trades are driven by size alone; size is handled by the materiality override, not by suspicion."
+reviewer_checks = ["No action beyond the materiality review if the notional is above the threshold."]
+
+[hypotheses.RECURRING_BENIGN_CONTEXT]
+title = "Curated history of this pattern"
+risk_theme = "Context"
+meaning = "How curated (quality-assured) outcomes of the same pattern in the same book were decided."
+why_it_matters = "Adverse history raises attention; cleared history never on its own makes a case bulk-eligible."
+reviewer_checks = ["Open the prior outcomes if the history is adverse."]
+
+# ---------------------------------------------------------------- signals
+
+[signals.max_price_change_pct]
+title = "Largest price change between versions"
+unit = "percent"
+meaning = "The biggest move in price from one version of a trade to the next."
+[signals.max_qty_change_pct]
+title = "Largest quantity change between versions"
+unit = "percent"
+meaning = "The biggest move in quantity from one version to the next; large post-trade increases can indicate late allocation of favourable trades."
+[signals.n_amends]
+title = "Number of amendments"
+unit = "count"
+meaning = "How many times the trades in the episode were amended; repeated re-marking is a concealment and mismarking signal."
+[signals.booking_latency_hours_max]
+title = "Booking latency"
+unit = "hours"
+meaning = "Longest gap between execution (event time) and when the trade was recorded."
+[signals.rebook_price_change_pct]
+title = "Rebook price change"
+unit = "percent"
+meaning = "Price difference between a cancelled trade and its rebook."
+[signals.hours_first_amend]
+title = "Time to first amendment"
+unit = "hours"
+meaning = "How long after booking the first amendment came; corrections are usually fast."
+[signals.book_signature_recurrence]
+title = "Pattern recurrence in the book"
+unit = "count"
+meaning = "How many earlier episodes in the same book had the same lifecycle pattern in the recurrence window."
+[signals.notional_usd_max]
+title = "Largest notional"
+unit = "USD"
+meaning = "The largest notional in the episode; size raises severity and triggers materiality review, it is not suspicious on its own."
+[signals.joint]
+title = "Rare combination"
+unit = "combination"
+meaning = "A combination of individually common facts that no other episode in the reference window shows."
+
+# ---------------------------------------------------------------- rules
+
+[rules.R100]
+title = "Price amendment"
+meaning = "Fires when an amendment changes the price by at least the configured percentage."
+[rules.R200]
+title = "Trade cancellation"
+meaning = "Fires on every cancellation."
+[rules.R300]
+title = "Late booking"
+meaning = "Fires when recording lags execution by at least the configured hours."
+[rules.R400]
+title = "Large notional"
+meaning = "Fires on new trades above the configured notional."
+[rules.R900]
+title = "Month-end QA sample"
+meaning = "External quality-assurance sample of month-end bookings; a source of curated labels, not a detection."
+
+# ---------------------------------------------------------------- reasons on cases
+
+[reasons.AGENT_UNAVAILABLE]
+meaning = "The investigation could not run; the case goes to individual review."
+[reasons.ABSTAINED]
+meaning = "The investigation abstained: evidence is missing or nothing was verified. Absence of contradiction is not confirmation."
+[reasons.ANOMALY_SUPPORTED]
+meaning = "A catalogued misconduct typology was verified from the evidence."
+[reasons.UNEXPLAINED_DEVIATION]
+meaning = "Verified deviations remain that no verified benign explanation accounts for."
+[reasons.BULK_POLICY_NOT_ELIGIBLE]
+meaning = "The verified benign explanation is not in the approved bulk policy for this desk."
+[reasons.UNCONFIRMED_AGENT_LINK]
+meaning = "The agent proposed a relationship that a human has not confirmed yet."
+[reasons.HISTORY_ADVERSE]
+meaning = "Curated history of this pattern contains escalations."
+[reasons.OVERRIDE]
+meaning = "A hard override applies (open RFI, above materiality, watch-list book)."
+[reasons.HIGH_ATTENTION_SCORE]
+meaning = "The attention score is in the high band."
+[reasons.DEGRADED]
+meaning = "Scoring ran degraded (e.g. no peer baseline), which blocks bulk proposals."
+[reasons.DATA_QUALITY]
+meaning = "A lifecycle or linking data-quality flag blocks bulk proposals."
+[reasons.CONTROL_SAMPLE]
+meaning = "Randomly drawn into the control sample that measures bulk quality; reviewed individually."
+[reasons.COHORT_BELOW_MIN_SIZE]
+meaning = "Too few similar cases to form an attestation cohort."
+[reasons.DATA_GATE]
+meaning = "A data freshness or completeness gate failed for this run; bulk proposals are suspended."
+[reasons.SAFE_MODE]
+meaning = "Operations suspended bulk proposals (safe mode)."
+
+# ---------------------------------------------------------------- classification
+
+[categories.TYPED_ANOMALY]
+meaning = "A catalogued misconduct typology is verified."
+[categories.UNEXPLAINED_DEVIATION]
+meaning = "Verified unusual behaviour with no verified benign explanation."
+[categories.VERIFIED_BENIGN]
+meaning = "A benign explanation is verified and nothing is left unexplained."
+[categories.UNRESOLVED]
+meaning = "No conclusion: evidence is missing or no explanation was verified."
+
+[corroboration.HYPOTHESIS_VERIFIED]
+meaning = "The concluded hypothesis passed deterministic verification."
+[corroboration.PEER_DEVIATION]
+meaning = "The behaviour is a verified outlier versus several peer groups."
+[corroboration.CONFIRMED_AT_EVERY_PEER_LEVEL]
+meaning = "Every peer population agrees the behaviour is an outlier."
+[corroboration.OWN_BOOK_HISTORY_DEVIATION]
+meaning = "The behaviour is also unusual for the book's own history."
+[corroboration.RARE_COMBINATION]
+meaning = "The combination of facts has not been seen in other episodes of the reference window."
+[corroboration.RULE_DETECTION]
+meaning = "A production surveillance rule also fired."
+[corroboration.ADVERSE_CURATED_HISTORY]
+meaning = "Curated history of the same pattern contains escalations."
+[corroboration.COMPETING_ANOMALIES_CONTRADICTED]
+meaning = "Every competing misconduct hypothesis was evaluated and contradicted."
+[corroboration.NO_UNEXPLAINED_DEVIATION]
+meaning = "No verified deviation is left unexplained."
+[corroboration.CLEARED_CURATED_HISTORY]
+meaning = "Curated history of this pattern is consistently cleared."
+[corroboration.MISSING]
+meaning = "Evidence the investigation still needs."
+
+[recommendations.PROPOSED_BULK]
+meaning = "Proposed for supervisor attestation in a cohort; never closed automatically."
+[recommendations.INDIVIDUAL_REVIEW]
+meaning = "An analyst reviews this case individually."
+[recommendations.ESCALATION_RECOMMENDED]
+meaning = "Recommended for escalation; the analyst decides."
+
+[findings.REDUNDANT_DETECTION]
+meaning = "Several alerts describe one business event."
+[findings.ALTERNATIVE_EXPLANATION]
+meaning = "The rule fired but a benign explanation is verified: a tuning opportunity."
+[findings.MISSING_CONTEXT]
+meaning = "The rule lacks lifecycle context (e.g. flags a like-for-like rebook as new exposure)."
+[findings.BLIND_SPOT]
+meaning = "Verified risk that no production rule detects."

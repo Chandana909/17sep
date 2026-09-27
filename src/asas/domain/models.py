@@ -223,6 +223,58 @@ class EpisodeScore(Record):
     degraded: tuple[str, ...]
 
 
+# ---------------------------------------------------------------- verified deviations
+
+
+class PeerStat(Record):
+    """One population comparison: who the peers are, how many, and where the value falls."""
+
+    level: str  # e.g. "desk_product:EQ|EQUITY", "global:*", "book:EQ-03"
+    n: int
+    median: Decimal
+    scale: Decimal
+    percentile: Decimal
+    robust_z: Decimal
+    deviant: bool
+
+
+class SignalDeviation(Record):
+    signal: str
+    value: Decimal
+    tail: str
+    peers: tuple[PeerStat, ...]
+    self_history: PeerStat | None
+    stable: bool | None  # None = the shifted reference was too small to test
+    confirming_levels: int
+    verified: bool
+    strength: Decimal  # 0..1, conservative (weakest confirming level)
+    reasons: tuple[str, ...]
+
+
+class JointRarity(Record):
+    """The rarest combination of individually common facts, vs the reference window."""
+
+    items: tuple[str, ...]
+    support: int
+    reference_n: int
+    min_item_support: int
+    verified: bool
+
+
+class DeviationProfile(Record):
+    episode_id: str
+    available: bool
+    baseline_period: datetime | None
+    screened: tuple[str, ...]
+    deviations: tuple[SignalDeviation, ...]
+    joint: JointRarity | None
+    verified: tuple[str, ...]  # verified signal names, plus "joint" for a verified combination
+    components: tuple[ScoreComponent, ...]
+    outlyingness: Decimal
+    band: str  # NONE | LOW | MEDIUM | HIGH
+    notes: tuple[str, ...]
+
+
 # ---------------------------------------------------------------- rules and policy
 
 
@@ -319,6 +371,7 @@ class Hypothesis(Record):
     contradicting: tuple[str, ...] = ()
     missing: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
+    signals: tuple[str, ...] = ()  # verified deviations a residual hypothesis rests on
 
 
 class LinkProposal(Record):
@@ -351,6 +404,9 @@ class InvestigationResult(Record):
     explanation: str
     steps: int
     tool_calls: int
+    unexplained_deviations: tuple[str, ...] = ()
+    explained_deviations: tuple[str, ...] = ()
+    pending_deviations: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------- cases
@@ -368,6 +424,29 @@ class CaseState(StrEnum):
     DECIDED = "DECIDED"
 
 
+class Category(StrEnum):
+    TYPED_ANOMALY = "TYPED_ANOMALY"  # a catalogued misconduct typology is verified
+    UNEXPLAINED_DEVIATION = "UNEXPLAINED_DEVIATION"  # verified deviation, no benign account
+    VERIFIED_BENIGN = "VERIFIED_BENIGN"
+    UNRESOLVED = "UNRESOLVED"  # abstained: evidence missing or no explanation verified
+
+
+class Classification(Record):
+    """Deterministic classification: what it is, how bad, how sure, and why."""
+
+    category: Category
+    typology: str
+    severity: str
+    confidence: str
+    corroboration: tuple[str, ...]  # independent lines of evidence behind the confidence
+    outlyingness: Decimal  # all verified deviations
+    residual_outlyingness: Decimal  # deviations no verified benign explanation accounts for
+    band: str
+    residual_band: str
+    unexplained: tuple[str, ...]
+    explained: tuple[str, ...]
+
+
 class Case(Record):
     case_id: str
     episode_id: str
@@ -382,6 +461,8 @@ class Case(Record):
     conclusion: str | None
     control_sample: bool
     cohort_id: str | None
+    classification: Classification | None = None
+    deviation: DeviationProfile | None = None
 
 
 class Cohort(Record):

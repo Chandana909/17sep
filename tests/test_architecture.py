@@ -26,6 +26,10 @@ DECISION_POLICY = [
     "engine/linking.py",
     "engine/challenge.py",
     "engine/discovery.py",
+    "engine/deviation.py",
+    "engine/classification.py",
+    "engine/capabilities.py",
+    "engine/items.py",
 ]
 PERSON_AND_WORKFLOW = {
     "TRADER_ID",
@@ -95,7 +99,15 @@ def test_decision_code_never_reads_person_or_workflow_fields(module: str) -> Non
 
 
 @pytest.mark.parametrize(
-    "module", ["engine/decisions.py", "engine/hypotheses.py", "engine/scoring.py"]
+    "module",
+    [
+        "engine/decisions.py",
+        "engine/hypotheses.py",
+        "engine/scoring.py",
+        "engine/deviation.py",
+        "engine/classification.py",
+        "engine/capabilities.py",
+    ],
 )
 def test_policy_modules_take_thresholds_from_config(module: str) -> None:
     allowed = {0, 1, 2, 100, 3600}
@@ -107,7 +119,7 @@ def test_policy_modules_take_thresholds_from_config(module: str) -> None:
             if (
                 isinstance(node.value, str)
                 and re.fullmatch(r"-?\d+\.\d+", node.value)
-                and node.value != "0.0001"
+                and node.value not in ("0.0001", "0.01")  # quantisation, not thresholds
             ):
                 bad.append((node.lineno, node.value))
     assert bad == []

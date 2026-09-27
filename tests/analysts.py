@@ -53,8 +53,18 @@ def adaptive_analyst(request: ModelRequest) -> str:
                 "purpose": "what else fired around this",
             }
         )
+    if obs.get("pending"):  # the verifier named competing hypotheses still to evaluate
+        return json.dumps(
+            {
+                "action": "propose_hypotheses",
+                "hypotheses": [
+                    {"type": t, "rationale": "the verifier requires this competitor"}
+                    for t in obs["pending"]
+                ],
+            }
+        )
     if not p["hypotheses"]:
-        types = ["RECURRING_BENIGN_CONTEXT"]
+        types = ["VERIFIED_PEER_DEVIATION", "RECURRING_BENIGN_CONTEXT"]
         if episode.get("signals.has_amend") == "true":
             types = ["OFF_MARKET_AMENDMENT", "PRICE_CORRECTION", "PERIOD_END_ROUND_TRIP", *types]
         if episode.get("signals.has_cancel") == "true":

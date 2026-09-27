@@ -23,6 +23,7 @@ from asas.domain.models import (
     LinkStatus,
     OutcomeLabel,
     RuleSpec,
+    SignalDeviation,
     TradeEvent,
     TradeLink,
     UnresolvedPair,
@@ -690,6 +691,53 @@ def compare_trades(snap: Snapshot, trade_a: str, trade_b: str) -> TradeCompariso
     )
 
 
+class DeviationView(View):
+    episode_id: str
+    available: bool
+    band: str
+    outlyingness: Decimal
+    screened: tuple[str, ...]
+    verified: tuple[str, ...]
+    summaries: dict[str, str]  # one line per deviating signal (and "joint"), with peers named
+    notes: tuple[str, ...]
+
+
+def _summary(d: SignalDeviation) -> str:
+    peers = "; ".join(
+        f"p{p.percentile} z{p.robust_z} vs {p.level} (n={p.n})" for p in d.peers if p.deviant
+    )
+    own = (
+        f"; own book p{d.self_history.percentile} (n={d.self_history.n})"
+        if d.self_history is not None and d.self_history.deviant
+        else ""
+    )
+    status = "VERIFIED" if d.verified else "NOT VERIFIED"
+    return f"{d.signal}={d.value} {status} [{', '.join(d.reasons)}]: {peers}{own}"
+
+
+def deviation_view(snap: Snapshot, episode_id: str) -> DeviationView:
+    _episode(snap, episode_id)
+    profile = snap.deviations[episode_id]
+    summaries = {d.signal: _summary(d) for d in profile.deviations}
+    if profile.joint is not None:
+        j = profile.joint
+        summaries["joint"] = (
+            f"combination {' + '.join(j.items)} seen {j.support} times in {j.reference_n} "
+            f"reference episodes (each fact seen >= {j.min_item_support} times): "
+            f"{'VERIFIED RARE' if j.verified else 'not rare enough'}"
+        )
+    return DeviationView(
+        episode_id=episode_id,
+        available=profile.available,
+        band=profile.band,
+        outlyingness=profile.outlyingness,
+        screened=profile.screened,
+        verified=profile.verified,
+        summaries=summaries,
+        notes=profile.notes,
+    )
+
+
 def verified_link_ids(snap: Snapshot) -> set[tuple[str, str]]:
     return {
         (p.trade_a, p.trade_b)
@@ -732,5 +780,6 @@ VIEW_TYPES: dict[str, type[BaseModel]] = {
         PriorOutcomes,
         RuleView,
         TradeComparison,
+        DeviationView,
     )
 }

@@ -20,7 +20,7 @@ from asas.agents.gateway import ModelRequest, ScriptedGateway
 from asas.core.config import Config
 from asas.core.errors import GovernanceError, ModelError, PermissionDenied
 from asas.core.security import SYSTEM, Principal, Role
-from asas.data.synthetic import INJECTION_TEXT, SyntheticDataset
+from asas.data.synthetic import INJECTION_TEXT, RISK_SCENARIOS, SyntheticDataset
 from asas.domain.models import (
     CandidateKind,
     CandidateState,
@@ -116,10 +116,11 @@ def test_04_agent_challenges_existing_rules(demo: DemoResult) -> None:
         if f.kind is FindingKind.BLIND_SPOT and f.status == "CONFIRMED"
     ]
     snap = demo.platform.snapshot(demo.dataset.end)
-    assert all(
-        _scenario(demo, snap.episodes_by_id[f.episode_id].trade_ids) == "WINDOW_DRESSING"
-        for f in blind
-    )
+    found = {_scenario(demo, snap.episodes_by_id[f.episode_id].trade_ids) for f in blind}
+    # every confirmed blind spot is real risk: the period-end typology no rule catches, and the
+    # novel behaviours only verified deviation analysis can see
+    assert found <= RISK_SCENARIOS
+    assert {"WINDOW_DRESSING", "QTY_INFLATION", "AMEND_CHURN"} <= found
 
 
 def test_05_uncaptured_pattern_is_discovered(demo: DemoResult) -> None:

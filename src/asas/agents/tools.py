@@ -43,9 +43,11 @@ class ToolContext:
         similar_cases: Callable[[str, int], ToolOutputList] | None = None,
         replay_rule: Callable[[str], BaseModel] | None = None,
         simulate_rule: Callable[[RuleSpec], BaseModel] | None = None,
+        glossary: Mapping[str, str] | None = None,
     ) -> None:
         self.snapshot = snapshot
         self.principal = principal
+        self.glossary = dict(glossary or {})  # hypothesis -> business risk context (prompting)
         self.graph_neighborhood = graph_neighborhood
         self.similar_cases = similar_cases
         self.replay_rule = replay_rule
@@ -178,6 +180,12 @@ TOOLS: Mapping[str, ToolSpec] = {
             "percentile and robust z of a signal vs frozen peers",
             "episode_id",
             "signal",
+        ),
+        _evidence_tool(
+            "get_deviation_profile",
+            "verified deviations vs peers, own book history and rare combinations, with the "
+            "peer populations named; the outlyingness breakdown",
+            "episode_id",
         ),
         _evidence_tool(
             "get_recurrence", "how often this pattern recurred in the book/instrument", "episode_id"

@@ -18,6 +18,7 @@ from asas.data.ingest import SourceBundle
 from asas.domain.models import (
     Alert,
     Detection,
+    DeviationProfile,
     Episode,
     EpisodeScore,
     LabelQuality,
@@ -29,6 +30,8 @@ from asas.domain.models import (
     TradeLink,
     TradePerson,
 )
+from asas.engine.capabilities import DataCapabilities, detect, rule_gaps
+from asas.engine.deviation import build_profiles
 from asas.engine.linking import LinkingResult, build_episodes
 from asas.engine.rules import evaluate_ruleset
 from asas.engine.scoring import score_episode
@@ -54,6 +57,9 @@ class Snapshot:
     persons_by_trade: Mapping[str, TradePerson]
     episodes_by_id: Mapping[str, Episode]
     link_proposals: tuple[LinkProposal, ...]
+    capabilities: DataCapabilities
+    deviations: Mapping[str, DeviationProfile]
+    rule_gaps: tuple[str, ...]
 
     @property
     def episodes(self) -> tuple[Episode, ...]:
@@ -107,6 +113,8 @@ def build_snapshot(
     for ep in linking.episodes:
         times.setdefault(ep.episode_id, as_of)
     signal_set = compute_signals(linking.episodes, events_by_trade, alerts_by_trade, times, cfg)
+    capabilities = detect(source, cfg)
+    deviations = build_profiles(linking.episodes, signal_set, capabilities, cfg)
     rfi_open = _open_rfis(source)
     scores: dict[str, EpisodeScore] = {}
     detections: dict[str, tuple[Detection, ...]] = {}
@@ -121,6 +129,7 @@ def build_snapshot(
             rules,
             any(a in rfi_open for a in ep.alert_ids),
             cfg,
+            deviations[ep.episode_id],
         )
         detections[ep.episode_id] = evaluate_ruleset(policy.ruleset.rules, signals)
 
@@ -156,4 +165,7 @@ def build_snapshot(
         persons_by_trade={p.trade_id: p for p in source.trade_persons},
         episodes_by_id={e.episode_id: e for e in linking.episodes},
         link_proposals=tuple(link_proposals),
+        capabilities=capabilities,
+        deviations=deviations,
+        rule_gaps=rule_gaps(policy.ruleset.rules, capabilities),
     )

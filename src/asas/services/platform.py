@@ -30,6 +30,7 @@ from asas.agents.memory import Memory
 from asas.agents.runtime import AgentRuntime
 from asas.agents.tools import ToolContext
 from asas.core.config import Config
+from asas.core.context import BusinessContext, load_context
 from asas.core.errors import AsasError, GovernanceError, PermissionDenied
 from asas.core.ids import content_hash, stable_id
 from asas.core.logging import get_logger, log_event
@@ -58,9 +59,10 @@ from asas.domain.models import (
 )
 from asas.engine.challenge import candidate_findings
 from asas.engine.decisions import case_id_for, decide_case, form_cohorts
-from asas.engine.discovery import EpisodeFacts, episode_items, mine_patterns, synthesize_rule
+from asas.engine.discovery import EpisodeFacts, mine_patterns, synthesize_rule
 from asas.engine.graph import EvidenceGraph, build_graph, neighborhood
 from asas.engine.hypotheses import Assessment, assess
+from asas.engine.items import episode_items
 from asas.engine.rules import evaluate_ruleset, load_ruleset
 from asas.engine.scoring import queue_key
 from asas.engine.snapshot import Snapshot, build_snapshot
@@ -165,8 +167,10 @@ class Platform:
         cfg: Config,
         gateway: ModelGateway | None = None,
         tracer: Tracer | None = None,
+        context: BusinessContext | None = None,
     ) -> None:
         self.cfg = cfg
+        self.context = context or load_context()
         self.store = Store(store_path)
         self.tracer = tracer or Tracer([StoreSpanExporter(self.store)])
         self.governance = Governance(self.store, cfg)
@@ -312,6 +316,10 @@ class Platform:
         return ToolContext(
             snapshot=snap,
             principal=agent_principal(agent, principal),
+            glossary={
+                h: f"{e.get('risk_theme', '')}: {e.get('why_it_matters', '')}"
+                for h, e in self.context.to_dict()["hypotheses"].items()
+            },
             graph_neighborhood=lambda node, depth: neighborhood(
                 self.graph(as_of), node, min(depth, graph_depth), graph_nodes
             ),
@@ -399,6 +407,9 @@ class Platform:
                         policy.bulk_policy,
                         self.cfg,
                         as_of,
+                        snap.deviations.get(ep.episode_id),
+                        snap.episode_rules(ep.episode_id),
+                        snap.signal_set.signals[ep.episode_id].numeric.get("notional_usd_max"),
                     )
                 )
             cases, cohorts = form_cohorts(decided, self.cfg)
@@ -455,17 +466,25 @@ class Platform:
             for c in candidate_findings(snap, assessments)
             if snap.episodes_by_id[c.episode_id].end >= review_start
         ]
+
+        def strongest(c: Any) -> tuple[Any, ...]:  # most outlying, then most attention
+            eid = c.episode_id
+            return (-snap.deviations[eid].outlyingness, -snap.scores[eid].total, c.finding_id)
+
+        # blind spots (risk no rule catches) have their own budget and are never crowded out
+        blind = sorted((c for c in candidates if c.kind.value == "BLIND_SPOT"), key=strongest)
+        chosen: list[Any] = blind[: self.cfg.integer("challenger", "max_blind_spots_per_run")]
         limit = self.cfg.integer("challenger", "max_findings_per_run")
-        order = ("BLIND_SPOT", "MISSING_CONTEXT", "ALTERNATIVE_EXPLANATION", "REDUNDANT_DETECTION")
+        order = ("MISSING_CONTEXT", "ALTERNATIVE_EXPLANATION", "REDUNDANT_DETECTION")
         queues = {
-            k: sorted((c for c in candidates if c.kind.value == k), key=lambda c: c.finding_id)
-            for k in order
+            k: sorted((c for c in candidates if c.kind.value == k), key=strongest) for k in order
         }
-        chosen: list[Any] = []
-        while len(chosen) < limit and any(queues.values()):
+        others: list[Any] = []
+        while len(others) < limit and any(queues.values()):
             for kind in order:  # round-robin in priority order so every kind is examined
-                if queues[kind] and len(chosen) < limit:
-                    chosen.append(queues[kind].pop(0))
+                if queues[kind] and len(others) < limit:
+                    others.append(queues[kind].pop(0))
+        chosen += others
         ctx = self.tool_context(as_of, principal, "challenger")
         outcome = self.runtime.run(
             ChallengerProgram(chosen, assessments), f"challenge:{snap.snapshot_id}", ctx

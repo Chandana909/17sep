@@ -25,7 +25,7 @@ from asas.core.errors import (
     ToolError,
 )
 from asas.core.security import Principal, Role
-from asas.domain.models import OutcomeLabel
+from asas.domain.models import Case, OutcomeLabel
 from asas.engine import evidence as ev
 from asas.engine.graph import neighborhood
 from asas.services.platform import Platform
@@ -112,6 +112,25 @@ def create_app(platform: Platform) -> FastAPI:
 
     def visible(p: Principal, desk: str) -> bool:
         return p.sees_desk(desk)
+
+    def _case_context(case: Case) -> dict[str, Any]:
+        """Business meaning of everything shown on a case (config/business_context.toml)."""
+        ctx = platform.context
+        cls = case.classification
+        signals = [d.signal for d in case.deviation.deviations] if case.deviation else []
+        if case.deviation and case.deviation.joint:
+            signals.append("joint")
+        return {
+            "version": ctx.version,
+            "conclusion": ctx.entry("hypotheses", case.conclusion) if case.conclusion else None,
+            "recommendation": ctx.meaning("recommendations", case.recommendation.value),
+            "category": ctx.meaning("categories", cls.category.value) if cls else "",
+            "reasons": {r: ctx.meaning("reasons", r) for r in case.reasons},
+            "corroboration": {c: ctx.meaning("corroboration", c) for c in cls.corroboration}
+            if cls
+            else {},
+            "signals": {s: ctx.entry("signals", s) for s in signals},
+        }
 
     @app.get("/")
     def index() -> FileResponse:
@@ -205,6 +224,7 @@ def create_app(platform: Platform) -> FastAPI:
         alerts = [ev.alert_view(snap, a).model_dump(mode="json") for a in case.alert_ids]
         return _json(
             {
+                "context": _case_context(case),
                 "case": json.loads(case.model_dump_json()),
                 "episode": ev.episode_view(snap, case.episode_id).model_dump(mode="json"),
                 "sequence": ev.event_sequence(snap, case.episode_id).model_dump(mode="json"),
@@ -346,6 +366,10 @@ def create_app(platform: Platform) -> FastAPI:
                 "recent": platform.store.audit_entries(min(limit, 500)),
             }
         )
+
+    @app.get("/api/context")
+    def business_context(p: Principal = Depends(principal)) -> JSONResponse:
+        return _json(platform.context.to_dict())
 
     @app.get("/api/evaluation")
     def evaluation(p: Principal = Depends(principal)) -> JSONResponse:

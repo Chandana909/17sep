@@ -9,10 +9,9 @@ ends at the month start), so the same episode always scores the same way.
 from __future__ import annotations
 
 import bisect
-import statistics
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import pairwise
@@ -238,6 +237,45 @@ def base_signals(
 # ---------------------------------------------------------------- baselines
 
 
+def level_key(signals: EpisodeSignals, level: str) -> str:
+    return "*" if level == "global" else signals.labels.get(level, "")
+
+
+def baseline_levels(cfg: Config) -> tuple[str, ...]:
+    """Peer levels for scoring plus the anomaly peer and self-history levels."""
+    return tuple(
+        dict.fromkeys(
+            (
+                *cfg.strings("signals", "peer_levels"),
+                *cfg.strings("anomaly", "peer_levels"),
+                cfg.string("anomaly", "self_level"),
+            )
+        )
+    )
+
+
+def median_of(values: Sequence[Decimal]) -> Decimal:
+    ordered = values if all(a <= b for a, b in pairwise(values)) else sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / Decimal(2)
+
+
+def robust_scale(population: Sequence[Decimal], median: Decimal, cfg: Config) -> Decimal:
+    """MAD-based scale; when MAD is 0 (a majority of identical values) fall back to the mean
+    absolute deviation, so a lone departure from a constant population still measures."""
+    mad = median_of([abs(v - median) for v in population])
+    if mad:
+        return cfg.decimal("signals", "mad_scale") * mad
+    mean_ad = sum((abs(v - median) for v in population), Decimal()) / Decimal(len(population))
+    return cfg.decimal("signals", "meanad_scale") * mean_ad
+
+
+def percentile_of(sorted_values: Sequence[Decimal], x: Decimal) -> Decimal:
+    return _percentile(sorted_values, x)
+
+
 def _percentile(sorted_values: Sequence[Decimal], x: Decimal) -> Decimal:
     """Mid-rank percentile: ties share the middle of their rank range, so a value equal to the
     common case never looks extreme."""
@@ -254,6 +292,22 @@ class Baseline:
     values: Mapping[tuple[str, str], Mapping[str, tuple[Decimal, ...]]]
     signature_share: Mapping[str, Decimal]
     total: int
+    # memoised (median, robust scale) per population; populations are frozen, so this is safe
+    _centre: dict[tuple[str, str, str], tuple[Decimal, Decimal]] = field(
+        default_factory=dict, repr=False, compare=False
+    )
+
+    def population(self, level: str, key: str, name: str) -> tuple[Decimal, ...]:
+        return tuple(self.values.get((level, key), {}).get(name, ()))
+
+    def centre(self, level: str, key: str, name: str, cfg: Config) -> tuple[Decimal, Decimal]:
+        """(median, robust scale) of a non-empty population, computed once."""
+        k = (level, key, name)
+        if k not in self._centre:
+            population = self.values[(level, key)][name]
+            median = median_of(population)
+            self._centre[k] = (median, robust_scale(population, median, cfg))
+        return self._centre[k]
 
     def compare(self, signals: EpisodeSignals, name: str, cfg: Config) -> OutlierEvidence | None:
         value = signals.numeric.get(name)
@@ -261,13 +315,11 @@ class Baseline:
             return None
         min_n = cfg.integer("signals", "min_peer_n")
         for level in cfg.strings("signals", "peer_levels"):
-            key = "*" if level == "global" else signals.labels.get(level, "")
-            population = self.values.get((level, key), {}).get(name, ())
+            key = level_key(signals, level)
+            population = self.population(level, key, name)
             if len(population) < min_n:
                 continue
-            median = Decimal(str(statistics.median(population)))
-            mad = Decimal(str(statistics.median([abs(v - median) for v in population])))
-            scale = cfg.decimal("signals", "mad_scale") * mad
+            median, scale = self.centre(level, key, name, cfg)
             z = ((value - median) / scale).quantize(Decimal("0.01")) if scale else None
             return OutlierEvidence(
                 signal=name,
@@ -289,12 +341,12 @@ def build_baseline(
     )
     signatures: Counter[str] = Counter()
     total = 0
-    levels = cfg.strings("signals", "peer_levels")
+    levels = baseline_levels(cfg)
     for s in reference:
         total += 1
         signatures[s.labels["sequence_signature"]] += 1
         for level in levels:
-            key = "*" if level == "global" else s.labels.get(level, "")
+            key = level_key(s, level)
             for name, value in s.numeric.items():
                 grouped[(level, key)][name].append(value)
     frozen = {k: {n: tuple(sorted(v)) for n, v in d.items()} for k, d in grouped.items()}
@@ -309,9 +361,19 @@ def build_baseline(
 class SignalSet:
     signals: Mapping[str, EpisodeSignals]
     baselines: Mapping[datetime, Baseline]
+    # reference window shifted back by anomaly.stability_shift_days (deviation stability)
+    shifted: Mapping[datetime, Baseline] = field(default_factory=dict)
+    # episode ids in each period's reference window (combination rarity)
+    reference_ids: Mapping[datetime, tuple[str, ...]] = field(default_factory=dict)
 
     def baseline_for(self, eval_time: datetime) -> Baseline | None:
         return self.baselines.get(period_start(eval_time))
+
+    def shifted_for(self, eval_time: datetime) -> Baseline | None:
+        return self.shifted.get(period_start(eval_time))
+
+    def reference_for(self, eval_time: datetime) -> tuple[str, ...]:
+        return self.reference_ids.get(period_start(eval_time), ())
 
 
 def compute_signals(
@@ -328,17 +390,9 @@ def compute_signals(
         als = [a for t in ep.trade_ids for a in alerts_by_trade.get(t, ())]
         base[ep.episode_id] = base_signals(ep, evs, als, eval_times[ep.episode_id], cfg)
         ends[ep.episode_id] = ep.end
-
-    lookback = timedelta(days=cfg.integer("signals", "baseline_lookback_days"))
-    periods = sorted({period_start(t) for t in eval_times.values()})
     by_end = sorted(ends.items(), key=lambda kv: kv[1])
-    end_times = [t for _, t in by_end]
-    baselines: dict[datetime, Baseline] = {}
-    for p in periods:
-        lo = bisect.bisect_left(end_times, p - lookback)
-        hi = bisect.bisect_left(end_times, p)
-        baselines[p] = build_baseline(p, (base[eid] for eid, _ in by_end[lo:hi]), cfg)
 
+    # recurrence first: it is part of the peer baselines (history-only, point in time)
     window = timedelta(days=cfg.integer("signals", "recurrence_window_days"))
     index: dict[tuple[str, str, str], list[datetime]] = defaultdict(list)
     for eid, end in by_end:
@@ -346,8 +400,7 @@ def compute_signals(
         sig = s.labels["sequence_signature"]
         index[("book", s.labels["book"], sig)].append(end)
         index[("instrument", s.labels["instrument_id"], sig)].append(end)
-
-    final: dict[str, EpisodeSignals] = {}
+    with_history: dict[str, EpisodeSignals] = {}
     for ep in episodes:
         s = base[ep.episode_id]
         sig = s.labels["sequence_signature"]
@@ -357,11 +410,37 @@ def compute_signals(
             lo = bisect.bisect_left(times, ep.start - window)
             hi = bisect.bisect_left(times, ep.start)
             numeric[f"{scope}_signature_recurrence"] = Decimal(max(hi - lo, 0))
+        with_history[ep.episode_id] = s.model_copy(update={"numeric": numeric})
+
+    lookback = timedelta(days=cfg.integer("signals", "baseline_lookback_days"))
+    shift = timedelta(days=cfg.integer("anomaly", "stability_shift_days"))
+    periods = sorted({period_start(t) for t in eval_times.values()})
+    end_times = [t for _, t in by_end]
+
+    def window_ids(start: datetime, stop: datetime) -> tuple[str, ...]:
+        lo = bisect.bisect_left(end_times, start)
+        hi = bisect.bisect_left(end_times, stop)
+        return tuple(eid for eid, _ in by_end[lo:hi])
+
+    baselines: dict[datetime, Baseline] = {}
+    shifted: dict[datetime, Baseline] = {}
+    reference_ids: dict[datetime, tuple[str, ...]] = {}
+    for p in periods:
+        ids = window_ids(p - lookback, p)
+        reference_ids[p] = ids
+        baselines[p] = build_baseline(p, (with_history[eid] for eid in ids), cfg)
+        older = window_ids(p - lookback - shift, p - shift)
+        shifted[p] = build_baseline(p - shift, (with_history[eid] for eid in older), cfg)
+
+    final: dict[str, EpisodeSignals] = {}
+    for ep in episodes:
+        s = with_history[ep.episode_id]
+        numeric = dict(s.numeric)
         baseline = baselines.get(period_start(s.eval_time))
         if baseline is not None and baseline.total:
-            share = baseline.signature_share.get(sig, Decimal(0))
+            share = baseline.signature_share.get(s.labels["sequence_signature"], Decimal(0))
             numeric["signature_rarity_pct"] = ((Decimal(1) - share) * _PCT).quantize(
                 Decimal("0.01")
             )
         final[ep.episode_id] = s.model_copy(update={"numeric": numeric})
-    return SignalSet(final, baselines)
+    return SignalSet(final, baselines, shifted, reference_ids)

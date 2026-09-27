@@ -43,6 +43,7 @@ INVESTIGATOR_TOOLS = frozenset(
         "get_related_episodes",
         "get_trader_baseline",
         "get_peer_comparison",
+        "get_deviation_profile",
         "get_recurrence",
         "get_prior_outcomes",
         "get_rule",
@@ -136,6 +137,7 @@ class HypState(BaseModel):
     evidence_ids: list[str] = []
     evaluated_at: int = -1
     needed: list[str] = []
+    signals: list[str] = []
 
 
 class InvState(BaseModel):
@@ -174,7 +176,7 @@ def _subject(state: InvState, ctx: ToolContext) -> Subject | None:
         return None
     verified = set(ev.verified_link_ids(ctx.snapshot))
     verified |= {(p.trade_a, p.trade_b) for p in state.proposals if p.status is LinkStatus.VERIFIED}
-    return Subject(episode, tuple(sorted(verified)))
+    return Subject(episode, tuple(sorted(verified)), ctx.snapshot.capabilities.unavailable)
 
 
 def _progress(state: InvState) -> int:
@@ -189,7 +191,11 @@ def _evaluations(state: InvState) -> list[tuple[hyp.HypothesisDef, hyp.Evaluatio
                 (
                     CATALOG_BY_TYPE[h.type],
                     hyp.Evaluation(
-                        h.status, list(h.supporting), list(h.contradicting), list(h.missing)
+                        h.status,
+                        list(h.supporting),
+                        list(h.contradicting),
+                        list(h.missing),
+                        list(h.signals),
                     ),
                 )
             )
@@ -262,7 +268,7 @@ class InvestigatorProgram:
             needed = sorted(r.key for r in definition.requirements(subject, cfg))
             if h.status is HypothesisStatus.PROPOSED or needed != h.needed:
                 return {"action": "evaluate", "hypothesis_id": h.hypothesis_id}
-        adjudication = hyp.adjudicate(_evaluations(state))
+        adjudication = hyp.adjudicate(_evaluations(state), hyp.explains_map(cfg))
         if adjudication.conclusion:
             target = next(x for x in state.hypotheses if x.type == adjudication.conclusion)
             return {
@@ -321,7 +327,12 @@ class InvestigatorProgram:
             "task": "investigate",
             "episode_id": state.episode_id,
             "catalog": [
-                {"type": h.type, "class": h.klass.value, "description": h.description}
+                {
+                    "type": h.type,
+                    "class": h.klass.value,
+                    "description": h.description,
+                    "business_context": ctx.glossary.get(h.type, ""),
+                }
                 for h in CATALOG
             ],
             "tools": tool_catalog(self.tools),
@@ -452,6 +463,7 @@ class InvestigatorProgram:
         h.supporting = result.supporting
         h.contradicting = result.contradicting
         h.missing = result.missing
+        h.signals = result.signals
         h.evidence_ids = [
             e.evidence_id for e in s.evidence if ToolRequest.of(e.tool, **e.args).key in needed
         ]
@@ -512,7 +524,7 @@ class InvestigatorProgram:
         if pending:
             s.rejections.append(f"conclude rejected: competing hypotheses not evaluated: {pending}")
             return {"rejected": "evaluate competing hypotheses first", "pending": pending}
-        adjudication = hyp.adjudicate(_evaluations(s))
+        adjudication = hyp.adjudicate(_evaluations(s), hyp.explains_map(ctx.snapshot.cfg))
         if adjudication.conclusion != h.type:
             s.rejections.append(
                 f"conclude rejected: verifier supports {adjudication.conclusion or 'no conclusion'}"
@@ -544,7 +556,7 @@ class InvestigatorProgram:
     def finalize(
         self, state: InvState, run_id: str, ctx: ToolContext, counters: Counters
     ) -> InvestigationResult:
-        adjudication = hyp.adjudicate(_evaluations(state))
+        adjudication = hyp.adjudicate(_evaluations(state), hyp.explains_map(ctx.snapshot.cfg))
         klass = CATALOG_BY_TYPE[state.conclusion].klass if state.conclusion else None
         hypotheses = tuple(
             Hypothesis(
@@ -557,6 +569,7 @@ class InvestigatorProgram:
                 contradicting=tuple(h.contradicting),
                 missing=tuple(h.missing),
                 evidence_ids=tuple(h.evidence_ids),
+                signals=tuple(h.signals),
             )
             for h in state.hypotheses
         )
@@ -586,13 +599,18 @@ class InvestigatorProgram:
             missing_evidence=tuple(state.missing if state.conclusion is None else ()),
             contradictions=adjudication.contradicted,
             link_proposals=tuple(state.proposals),
-            explanation=explain(state, klass),
+            explanation=explain(state, klass, adjudication),
             steps=counters.steps,
             tool_calls=counters.tool_calls,
+            unexplained_deviations=adjudication.unexplained,
+            explained_deviations=adjudication.explained,
+            pending_deviations=adjudication.pending,
         )
 
 
-def explain(state: InvState, klass: HypothesisClass | None) -> str:
+def explain(
+    state: InvState, klass: HypothesisClass | None, adjudication: hyp.Adjudication | None = None
+) -> str:
     """Deterministic, evidence-grounded narrative; agent summary is appended only if valid."""
     lines = [
         f"Episode {state.episode_id}: {len(state.hypotheses)} hypotheses considered, "
@@ -606,6 +624,13 @@ def explain(state: InvState, klass: HypothesisClass | None) -> str:
         lines.append(
             f"- Proposed relationship {p.trade_b} rebooks {p.trade_a}: {p.status.value} "
             "(quarantined until a human confirms)."
+        )
+    if adjudication is not None and (adjudication.unexplained or adjudication.explained):
+        lines.append(
+            "Deviations: unexplained "
+            f"{', '.join(adjudication.unexplained) or 'none'}; explained by a verified benign "
+            f"hypothesis {', '.join(adjudication.explained) or 'none'}; awaiting evidence "
+            f"{', '.join(adjudication.pending) or 'none'}."
         )
     if state.conclusion:
         lines.append(

@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from asas.core.config import Config
 from asas.domain.models import (
+    DeviationProfile,
     Episode,
     EpisodeScore,
     EpisodeSignals,
@@ -44,6 +45,7 @@ def score_episode(
     alert_rule_ids: Iterable[str],
     rfi_open: bool,
     cfg: Config,
+    deviation: DeviationProfile | None = None,
 ) -> EpisodeScore:
     weights = cfg.section("scoring", "weights")
     w = {k: Decimal(str(v)) for k, v in weights.items()}
@@ -121,6 +123,19 @@ def score_episode(
             Decimal(len(quality)),
             w["data_quality"],
             ", ".join(quality) or "no quality flags",
+        )
+    )
+
+    components.append(
+        _component(
+            "outlyingness",
+            deviation.outlyingness if deviation is not None else Decimal(),
+            w["outlyingness"],
+            (
+                f"{deviation.band}: verified {', '.join(deviation.verified) or 'none'}"
+                if deviation is not None
+                else "not profiled"
+            ),
         )
     )
 

@@ -1,14 +1,21 @@
 """Evaluation harness: score the platform against labelled truth.
 
-Measures linking precision/recall (pairwise), detection recall of risky episodes by production
-rules alone vs the agentic system (investigation + challenger + released candidates), bulk
-proposal precision (the false-suppression risk), escalation precision/recall, abstention, and
-a score-only baseline (rank-by-score, the ML-ensemble style) for comparison.
+Measures:
+- linking precision and recall (pairwise)
+- detection recall of risky episodes by production rules alone vs the agentic system
+  (investigation, challenger, released candidates)
+- bulk proposal precision (the false-suppression risk)
+- escalation precision and recall
+- abstention
+- three rankings of the same review window at k = number of risky episodes:
+  - the attention score (rank-by-score, the ML-ensemble style)
+  - raw verified outlyingness (what an unsupervised outlier model gives)
+  - residual outlyingness: deviations no verified benign explanation accounts for
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
 from itertools import combinations
@@ -18,12 +25,14 @@ from pydantic import BaseModel, ConfigDict
 from asas.data.synthetic import SyntheticTruth
 from asas.domain.models import (
     Case,
+    Category,
     ChallengeFinding,
     FindingKind,
     HypothesisClass,
     Recommendation,
     RuleSpec,
 )
+from asas.engine.deviation import residual
 from asas.engine.hypotheses import Assessment
 from asas.engine.rules import evaluate_ruleset
 from asas.engine.snapshot import Snapshot
@@ -42,6 +51,7 @@ class EvaluationReport(BaseModel):
     detection: dict[str, str]
     treatment: dict[str, str]
     score_only_baseline: dict[str, str]
+    anomaly_ranking: dict[str, str]
     discovery: dict[str, str]
 
 
@@ -98,7 +108,13 @@ def evaluate(
     candidate_detects = {
         eid for eid in all_eps if evaluate_ruleset(released_rules, snap.signal_set.signals[eid])
     }
-    agentic = escalated | blind | candidate_detects
+    flagged = {
+        c.episode_id
+        for c in cases
+        if c.classification is not None
+        and c.classification.category in (Category.TYPED_ANOMALY, Category.UNEXPLAINED_DEVIATION)
+    }
+    agentic = escalated | flagged | blind | candidate_detects
     detection = {
         "risky_episodes_in_window": str(len(risky_eps)),
         "recall_production_rules": _ratio(
@@ -111,6 +127,14 @@ def evaluate(
             sum((e in agentic) and not production_detects(e) for e in risky_eps)
         ),
         "released_rule_detections": str(len(candidate_detects)),
+        "risky_found_only_by_deviation_analysis": str(
+            sum(
+                1
+                for e in risky_eps
+                if (a := assessments.get(e)) is not None
+                and a.adjudication.conclusion == "VERIFIED_PEER_DEVIATION"
+            )
+        ),
     }
     bulk = [c for c in cases if c.recommendation is Recommendation.PROPOSED_BULK]
     esc = [c for c in cases if c.recommendation is Recommendation.ESCALATION_RECOMMENDED]
@@ -139,6 +163,7 @@ def evaluate(
         "explains_why": "no - a rank without verified hypotheses",
         "proposes_rule_changes": "no",
     }
+    anomaly_ranking = _rankings(snap, assessments, all_eps, risky_eps, risky)
     anomalous_assessed = [
         e
         for e in all_eps
@@ -160,8 +185,57 @@ def evaluate(
         detection=detection,
         treatment=treatment,
         score_only_baseline=score_only,
+        anomaly_ranking=anomaly_ranking,
         discovery=discovery,
     )
+
+
+def _rankings(
+    snap: Snapshot,
+    assessments: Mapping[str, Assessment],
+    episodes: Sequence[str],
+    risky_eps: Sequence[str],
+    risky: Callable[[str], bool],
+) -> dict[str, str]:
+    """Precision@k of four queues over the same window (ties broken by attention, then id):
+    attention score, raw outlyingness, residual (unexplained) outlyingness, and the full
+    verified assessment (typed anomalies and unexplained deviations first)."""
+    k = len(risky_eps)
+    raw = {e: snap.deviations[e].outlyingness for e in episodes}
+    res: dict[str, Decimal] = {}
+    for e in episodes:
+        a = assessments.get(e)
+        unexplained = a.adjudication.unexplained if a is not None else ()
+        res[e] = residual(snap.deviations[e], unexplained, snap.cfg)[1]
+
+    def at_k(key: Callable[[str], tuple[Decimal, ...]]) -> str:
+        top = sorted(episodes, key=lambda e: (*key(e), e))[:k]
+        return _ratio(sum(risky(e) for e in top), len(top))
+
+    def anomalous(e: str) -> bool:
+        a = assessments.get(e)
+        return a is not None and a.adjudication.klass is HypothesisClass.ANOMALOUS
+
+    flagged = [e for e in episodes if res[e] > 0]
+    return {
+        "k (= risky episodes)": str(k),
+        "precision_at_k_attention_score": at_k(lambda e: (-snap.scores[e].total,)),
+        "precision_at_k_raw_outlyingness": at_k(lambda e: (-raw[e], -snap.scores[e].total)),
+        "precision_at_k_residual_outlyingness": at_k(lambda e: (-res[e], -snap.scores[e].total)),
+        "precision_at_k_verified_assessment": at_k(
+            lambda e: (
+                Decimal(0) if anomalous(e) else Decimal(1),
+                -res[e],
+                -snap.scores[e].total,
+            )
+        ),
+        "raw_outlying_episodes": str(sum(1 for e in episodes if raw[e] > 0)),
+        "raw_outlying_precision": _ratio(
+            sum(risky(e) for e in episodes if raw[e] > 0), sum(1 for e in episodes if raw[e] > 0)
+        ),
+        "unexplained_episodes": str(len(flagged)),
+        "unexplained_precision": _ratio(sum(risky(e) for e in flagged), len(flagged)),
+    }
 
 
 def render_markdown(report: EvaluationReport) -> str:
@@ -176,6 +250,7 @@ def render_markdown(report: EvaluationReport) -> str:
             table("Detection of risky episodes (review window)", report.detection),
             table("Case treatment", report.treatment),
             table("Score-only baseline (ML-ensemble style ranking)", report.score_only_baseline),
+            table("Anomaly ranking: raw vs explained-away outlyingness", report.anomaly_ranking),
             table("Deterministic assessment", report.discovery),
         ]
     )

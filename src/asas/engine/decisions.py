@@ -1,10 +1,13 @@
 """Deterministic case decisions: the gate between investigation and human review.
 
 A case may be proposed for bulk attestation only when an investigation concluded a BENIGN
-hypothesis that deterministic verification SUPPORTED, the active bulk policy covers it, no
-override / high-attention / data-quality / unconfirmed-link reason exists, and it was not
-drawn into the control sample. Everything else goes to individual review; supported
-anomalies are recommended for escalation. Nothing is closed by the system.
+hypothesis that deterministic verification SUPPORTED, no verified deviation is left
+unexplained, the active bulk policy covers it, no override / high-attention / data-quality /
+unconfirmed-link reason exists, and it was not drawn into the control sample. Everything else
+goes to individual review. Typed anomalies are recommended for escalation; an unexplained
+verified deviation is escalated when its residual outlyingness reaches
+`anomaly.residual_escalation_band`, otherwise it is prioritised for individual review.
+Nothing is closed by the system.
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from datetime import datetime
+from decimal import Decimal
 
 from asas.core.config import Config
 from asas.core.ids import fraction_from_hash, stable_id
@@ -20,6 +24,7 @@ from asas.domain.models import (
     Case,
     CaseState,
     Cohort,
+    DeviationProfile,
     Episode,
     EpisodeScore,
     HypothesisClass,
@@ -27,6 +32,28 @@ from asas.domain.models import (
     InvestigationResult,
     LinkStatus,
     Recommendation,
+)
+from asas.engine.classification import classify
+from asas.engine.deviation import band_rank
+from asas.engine.hypotheses import CATALOG_BY_TYPE
+
+# Every reason prefix a case can carry (business meaning: config/business_context.toml).
+REASON_CODES = (
+    "AGENT_UNAVAILABLE",
+    "ABSTAINED",
+    "ANOMALY_SUPPORTED",
+    "UNEXPLAINED_DEVIATION",
+    "BULK_POLICY_NOT_ELIGIBLE",
+    "UNCONFIRMED_AGENT_LINK",
+    "HISTORY_ADVERSE",
+    "OVERRIDE",
+    "HIGH_ATTENTION_SCORE",
+    "DEGRADED",
+    "DATA_QUALITY",
+    "CONTROL_SAMPLE",
+    "COHORT_BELOW_MIN_SIZE",
+    "DATA_GATE",
+    "SAFE_MODE",
 )
 
 
@@ -48,16 +75,27 @@ def decide_case(
     policy: BulkPolicy,
     cfg: Config,
     as_of: datetime,
+    deviation: DeviationProfile | None = None,
+    rules: tuple[str, ...] = (),
+    notional_usd: Decimal | None = None,
 ) -> Case:
     case_id = case_id_for(episode.episode_id)
     reasons: list[str] = []
     recommendation = Recommendation.INDIVIDUAL_REVIEW
     conclusion = investigation.conclusion if investigation else None
+    classification = classify(investigation, deviation, rules, notional_usd, cfg)
 
     if investigation is None:
         reasons.append(f"AGENT_UNAVAILABLE:{investigation_error or 'NOT_RUN'}")
     elif investigation.abstained:
         reasons.append(f"ABSTAINED:{investigation.abstain_reason}")
+    elif investigation.conclusion_class is HypothesisClass.ANOMALOUS and (
+        conclusion is not None and CATALOG_BY_TYPE[conclusion].residual
+    ):
+        reasons.append(f"UNEXPLAINED_DEVIATION:{','.join(investigation.unexplained_deviations)}")
+        threshold = cfg.string("anomaly", "residual_escalation_band")
+        if band_rank(classification.residual_band) >= band_rank(threshold):
+            recommendation = Recommendation.ESCALATION_RECOMMENDED
     elif investigation.conclusion_class is HypothesisClass.ANOMALOUS:
         recommendation = Recommendation.ESCALATION_RECOMMENDED
         reasons.append(f"ANOMALY_SUPPORTED:{conclusion}")
@@ -104,6 +142,8 @@ def decide_case(
         conclusion=conclusion,
         control_sample=control,
         cohort_id=None,
+        classification=classification,
+        deviation=deviation,
     )
 
 
