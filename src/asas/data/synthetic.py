@@ -949,3 +949,105 @@ def write_csv(dataset: SyntheticDataset, out_dir: str | Path) -> None:
             for o in dataset.bundle.outcomes
         ],
     )
+
+
+_VENDOR_EVENT = {"NEW": "N", "AMEND": "AMD", "CANCEL": "CXL"}
+_VENDOR_OUTCOME = {"CLEARED": "FALSE_POSITIVE", "ESCALATED": "TRUE_POSITIVE"}
+_VENDOR_QUALITY = {"CURATED": "QA_PASSED", "RAW": "UNREVIEWED"}
+VENDOR_TS = "%d/%m/%Y %H:%M:%S"
+
+
+def write_vendor_extract(dataset: SyntheticDataset, out_dir: str | Path) -> None:
+    """Write the dataset the way a real bank extract looks: vendor column names and codes,
+    naive local-format timestamps, extra columns, and four file formats (CSV, Parquet, JSON
+    Lines, Excel). Used to exercise `asas data draft-mapping / check` end to end."""
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from openpyxl import Workbook
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    trader = {p.trade_id: p.trader_id for p in dataset.bundle.trade_persons}
+
+    def naive(ts: datetime) -> datetime:
+        return ts.astimezone(UTC).replace(tzinfo=None)
+
+    with open(out / "cal_trade_versions.csv", "w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "DEAL_ID", "VERSION_NO", "TRADE_ACTION", "EXECUTION_TIME", "CREATED_AT",
+                "BOOK_CODE", "DESK", "ISIN", "PRODUCT", "BUY_SELL", "QTY", "TRADE_PRICE",
+                "CCY", "USD_NOTIONAL", "ORIG_TRADE_ID", "LEGACY_TRADE_ID", "BLOCK_REF",
+                "SOURCE_SYSTEM", "TRADER", "COST_CENTER",
+            ]
+        )  # fmt: skip
+        for e in dataset.bundle.trade_events:
+            writer.writerow(
+                [
+                    e.trade_id, e.version, _VENDOR_EVENT[e.event_type.value],
+                    naive(e.event_time).strftime(VENDOR_TS),
+                    naive(e.record_time).strftime(VENDOR_TS),
+                    e.book, e.desk, e.instrument_id, e.product_type,
+                    (e.side.value[0] if e.side else ""), e.quantity, e.price, e.currency,
+                    e.notional_usd, e.original_trade_id or "", e.alternate_trade_id or "",
+                    e.urn_ref or "", e.source, trader.get(e.trade_id, "") if e.version == 1 else "",
+                    "CC-100",
+                ]
+            )  # fmt: skip
+
+    annex = {a.alert_id: a for a in dataset.bundle.alert_annexes}
+    alerts = dataset.bundle.alerts
+    table = pa.table(
+        {
+            "ALERT_ID": [a.alert_id for a in alerts],
+            "ALERT_TYPE_ID": [a.rule_id for a in alerts],
+            "MX_ALERT_TYPE": [a.subrule_id for a in alerts],
+            "ALERT_DATE": [naive(a.alert_time) for a in alerts],
+            "CREATED_AT": [naive(a.record_time) for a in alerts],
+            "TRADE_REF": [a.trade_id for a in alerts],
+            "VERSION": [a.trade_version for a in alerts],
+            "BOOK": [a.book for a in alerts],
+            "DESK": [a.desk for a in alerts],
+            "ISIN": [a.instrument_id for a in alerts],
+            "REASON_COMMENT": [a.explanation for a in alerts],
+            "ALERT_GRP_ID": [annex[a.alert_id].workflow.get("ALERT_GRP_ID") for a in alerts],
+            "SUPERVISOR_GRP": [annex[a.alert_id].persons.get("SUPERVISOR_GRP") for a in alerts],
+            "LOCATION": ["LDN" for _ in alerts],
+        }
+    )
+    pq.write_table(table, out / "scp_alerts.parquet")
+
+    with open(out / "rfi_log.jsonl", "w", encoding="utf-8") as fh:
+        for r in dataset.bundle.rfi_events:
+            action = "OPEN" if r.action.value == "OPENED" else "CLOSE"
+            fh.write(
+                json.dumps(
+                    {
+                        "ALERT_ID": r.alert_id,
+                        "ACTION": action,
+                        "CREATED_AT": naive(r.record_time).isoformat(),
+                    }
+                )
+                + "\n"
+            )
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(
+        ["DISPOSITION_ID", "ALERT_ID", "DISPOSITION", "QA_STATUS", "DISPOSITION_TIME", "REVIEWER"]
+    )
+    for o in dataset.bundle.outcomes:
+        sheet.append(
+            [
+                o.outcome_id,
+                o.alert_id,
+                _VENDOR_OUTCOME[o.label.value],
+                _VENDOR_QUALITY[o.quality.value],
+                naive(o.decided_at).replace(microsecond=0),
+                o.decided_by,
+            ]
+        )
+    book.save(out / "dispositions.xlsx")

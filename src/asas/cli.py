@@ -2,11 +2,16 @@
 
 asas demo      --db out/asas.db [--days 120] [--report out/evaluation.md]
 asas serve     --db out/asas.db [--host 127.0.0.1] [--port 8000]
-asas generate  --out data/synthetic [--days 120]
+asas generate  --out data/synthetic [--days 120] [--style contract|vendor]
 asas ingest    --db out/asas.db --data <dir> [--mapping config/mapping.example.toml]
 asas pipeline  --db out/asas.db [--as-of ISO]
 asas challenge | discover --db out/asas.db [--as-of ISO]
 asas verify-audit --db out/asas.db
+
+asas data profile        --data <dir> [--json]
+asas data draft-mapping  --data <dir> --out config/mappings/<name>.toml
+asas data check          --data <dir> --mapping <file> [--json]
+asas data capabilities   --data <dir> --mapping <file> [--json]
 """
 
 from __future__ import annotations
@@ -17,15 +22,25 @@ import sys
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from asas.core.config import default_config_path, load_config
 from asas.core.errors import AsasError
 from asas.core.logging import configure_logging
 from asas.core.security import SYSTEM
-from asas.data.ingest import identity_mapping, load_csv_bundle, load_mapping
-from asas.data.synthetic import GeneratorSpec, generate, write_csv
+from asas.data.ingest import (
+    SourceBundle,
+    identity_mapping,
+    load_mapping,
+    load_source_bundle,
+    process_source,
+)
+from asas.data.profiling import draft_mapping, load_synonyms, profile_directory
+from asas.data.synthetic import GeneratorSpec, generate, write_csv, write_vendor_extract
+from asas.engine.rules import load_ruleset
 from asas.services.demo import ADMIN, ANALYST, ruleset_path, run_demo
 from asas.services.evaluation import render_markdown
+from asas.services.integration import capability_matrix, render_matrix
 from asas.services.platform import Platform, build_gateway
 from asas.store.db import Store
 
@@ -99,15 +114,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 def cmd_generate(args: argparse.Namespace) -> int:
     dataset = generate(GeneratorSpec(days=args.days, seed=args.seed))
-    write_csv(dataset, args.out)
-    print(f"wrote synthetic SCP/CAL files to {args.out}")
+    if args.style == "vendor":
+        write_vendor_extract(dataset, args.out)
+        print(f"wrote vendor-style extract (csv, parquet, jsonl, xlsx) to {args.out}")
+    else:
+        write_csv(dataset, args.out)
+        print(f"wrote synthetic SCP/CAL files in contract columns to {args.out}")
     return 0
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     platform = _platform(args)
     mapping = load_mapping(args.mapping) if args.mapping else identity_mapping()
-    counts = platform.ingest(load_csv_bundle(args.data, mapping), ADMIN)
+    counts = platform.ingest(load_source_bundle(args.data, mapping), ADMIN)
     print(json.dumps(counts, indent=1))
     return 0
 
@@ -141,6 +160,59 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_data_profile(args: argparse.Namespace) -> int:
+    profiles = profile_directory(args.data)
+    if args.json:
+        print(json.dumps([p.to_dict() for p in profiles], indent=1, default=str))
+        return 0
+    for p in profiles:
+        print(f"{p.path}: {p.rows} rows {p.error}")
+        for name, col in p.columns.items():
+            print(
+                f"  {name:<32} filled {col.filled}/{p.rows}  distinct {len(col.distinct)}  "
+                f"{','.join(sorted(col.kinds))}  e.g. {col.samples[:3]}"
+            )
+    return 0
+
+
+def cmd_data_draft(args: argparse.Namespace) -> int:
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        print(f"refusing to overwrite {out}; pass --force", file=sys.stderr)
+        return 2
+    synonyms = load_synonyms(args.synonyms) if args.synonyms else load_synonyms()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(draft_mapping(args.data, synonyms), encoding="utf-8")
+    print(f"wrote draft mapping {out}; review the # REVIEW and # TODO lines, then run:")
+    print(f"  python -m asas data check --data {args.data} --mapping {out}")
+    return 0
+
+
+def _matrix(args: argparse.Namespace, bundle: SourceBundle) -> dict[str, Any]:
+    cfg = load_config(args.config)
+    return capability_matrix(bundle, cfg, load_ruleset(ruleset_path(), cfg).rules)
+
+
+def cmd_data_check(args: argparse.Namespace) -> int:
+    mapping = load_mapping(args.mapping)
+    report, bundle = process_source(args.data, mapping, args.max_issues)
+    matrix = _matrix(args, bundle) if report.ok else None
+    if args.json:
+        print(json.dumps({"validation": report.to_dict(), "capabilities": matrix}, indent=1))
+    else:
+        print(report.render())
+        if matrix is not None:
+            print(render_matrix(matrix))
+    return 0 if report.ok else 1
+
+
+def cmd_data_capabilities(args: argparse.Namespace) -> int:
+    bundle = load_source_bundle(args.data, load_mapping(args.mapping))
+    matrix = _matrix(args, bundle)
+    print(json.dumps(matrix, indent=1) if args.json else render_matrix(matrix))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="asas", description="Auditable agentic surveillance")
     parser.add_argument("--config", default=str(default_config_path()))
@@ -161,8 +233,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, default=8000)
     p.set_defaults(func=cmd_serve)
 
-    p = sub.add_parser("generate", help="write synthetic SCP/CAL CSV files")
+    p = sub.add_parser("generate", help="write synthetic SCP/CAL files")
     p.add_argument("--out", required=True)
+    p.add_argument(
+        "--style",
+        choices=("contract", "vendor"),
+        default="contract",
+        help="contract column names, or a vendor-style extract to practise integration",
+    )
     p.add_argument("--days", type=int, default=120)
     p.add_argument("--seed", type=int, default=7)
     p.set_defaults(func=cmd_generate)
@@ -183,6 +261,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = with_db(sub.add_parser("verify-audit", help="verify the hash-chained audit log"))
     p.set_defaults(func=cmd_verify)
+
+    data = sub.add_parser("data", help="integrate real extracts: profile, draft, check")
+    dsub = data.add_subparsers(dest="data_command", required=True)
+    p = dsub.add_parser("profile", help="describe every extract file in a directory")
+    p.add_argument("--data", required=True)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_data_profile)
+    p = dsub.add_parser("draft-mapping", help="propose a mapping TOML from the headers")
+    p.add_argument("--data", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--synonyms")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_data_draft)
+    p = dsub.add_parser("check", help="validate every row; list each problem with a fix")
+    p.add_argument("--data", required=True)
+    p.add_argument("--mapping", required=True)
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--max-issues", type=int, default=50)
+    p.set_defaults(func=cmd_data_check)
+    p = dsub.add_parser("capabilities", help="what works with the fields you have")
+    p.add_argument("--data", required=True)
+    p.add_argument("--mapping", required=True)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_data_capabilities)
     return parser
 
 

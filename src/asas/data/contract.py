@@ -101,3 +101,45 @@ REQUIRED_FIELDS: Mapping[str, frozenset[str]] = {
 }
 TIMESTAMP_FIELDS = frozenset({"EVENT_TIME", "RECORD_TIME", "ALERT_TIME", "DECIDED_AT"})
 ENTITIES = ("trade_events", "alerts", "rfi_events", "outcomes")
+DECIMAL_FIELDS = frozenset({"QUANTITY", "PRICE", "NOTIONAL_USD"})
+INTEGER_FIELDS = frozenset({"TRADE_VERSION"})
+ENUM_VALUES: Mapping[str, frozenset[str]] = {
+    "EVENT_TYPE": frozenset({"NEW", "AMEND", "CANCEL"}),
+    "SIDE": frozenset({"BUY", "SELL"}),
+    "RFI_ACTION": frozenset({"OPENED", "CLOSED"}),
+    "OUTCOME": frozenset({"CLEARED", "ESCALATED"}),
+    "LABEL_QUALITY": frozenset({"RAW", "CURATED"}),
+}
+# What each field means, for integration tooling and generated mappings.
+FIELD_HELP: Mapping[str, str] = {
+    "TRADE_ID": "stable identifier of a trade across its versions",
+    "TRADE_VERSION": "version number of the trade (1 = first booking)",
+    "EVENT_TYPE": "NEW, AMEND or CANCEL",
+    "EVENT_TIME": "when the business event happened (execution / amendment time)",
+    "RECORD_TIME": "when the system recorded it (drives point-in-time reads)",
+    "BOOK": "trading book",
+    "DESK": "desk (entitlement and peer grouping)",
+    "INSTRUMENT_ID": "instrument identifier",
+    "PRODUCT_TYPE": "product type (peer grouping)",
+    "SIDE": "BUY or SELL",
+    "QUANTITY": "quantity / nominal",
+    "PRICE": "trade price",
+    "CURRENCY": "trade currency",
+    "NOTIONAL_USD": "notional in USD",
+    "ORIGINAL_TRADE_ID": "trade this one rebooks (strong lineage key)",
+    "ALTERNATE_TRADE_ID": "alternate / legacy identifier (medium linking key)",
+    "URN_REF": "shared reference such as a block or allocation URN (medium linking key)",
+    "SOURCE": "source system",
+    "TRADER_ID": "trader (person data: quarantined, entitlement-gated)",
+    "ALERT_ID": "alert identifier",
+    "RULE_ID": "surveillance rule",
+    "SUBRULE_ID": "surveillance sub-rule",
+    "ALERT_TIME": "when the alert fired",
+    "EXPLANATION_TEXT": "free-text explanation (untrusted)",
+    "RFI_ACTION": "OPENED or CLOSED",
+    "OUTCOME_ID": "review outcome identifier",
+    "OUTCOME": "CLEARED or ESCALATED",
+    "LABEL_QUALITY": "RAW or CURATED (only CURATED is ground truth)",
+    "DECIDED_AT": "when the outcome was decided",
+    "DECIDED_BY": "who decided it",
+}
