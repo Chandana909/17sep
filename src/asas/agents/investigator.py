@@ -153,6 +153,8 @@ class InvState(BaseModel):
     abstain_reason: str | None = None
     missing: list[str] = []
     rejections: list[str] = []
+    streak: int = 0  # consecutive rejected or failed actions
+    recovering: bool = False  # the playbook finishes the run after a stuck model
     last_observation: dict[str, Any] = {}
 
 
@@ -177,6 +179,17 @@ def _subject(state: InvState, ctx: ToolContext) -> Subject | None:
     verified = set(ev.verified_link_ids(ctx.snapshot))
     verified |= {(p.trade_a, p.trade_b) for p in state.proposals if p.status is LinkStatus.VERIFIED}
     return Subject(episode, tuple(sorted(verified)), ctx.snapshot.capabilities.unavailable)
+
+
+def _signature(state: InvState) -> tuple[Any, ...]:
+    """What an action can change. Equal before and after = the action made no progress."""
+    return (
+        tuple((h.type, h.status, h.evaluated_at, tuple(h.missing)) for h in state.hypotheses),
+        len(state.evidence),
+        tuple((p.proposal_id, p.status) for p in state.proposals),
+        state.conclusion,
+        state.abstained,
+    )
 
 
 def _progress(state: InvState) -> int:
@@ -243,13 +256,12 @@ class InvestigatorProgram:
                 "args": {"episode_id": state.episode_id},
                 "purpose": "establish the episode",
             }
-        if not state.hypotheses:
+        proposed = {h.type for h in state.hypotheses}
+        missing_types = [h for h in hyp.applicable(subject, cfg) if h.type not in proposed]
+        if missing_types:  # also completes a model's too-narrow hypothesis set
             return {
                 "action": "propose_hypotheses",
-                "hypotheses": [
-                    {"type": h.type, "rationale": h.description}
-                    for h in hyp.applicable(subject, cfg)
-                ],
+                "hypotheses": [{"type": h.type, "rationale": h.description} for h in missing_types],
             }
         bag = _bag(state)
         link_action = self._link_step(state, subject, bag, ctx)
@@ -385,6 +397,7 @@ class InvestigatorProgram:
     ) -> tuple[InvState, dict[str, Any]]:
         parsed = _ADAPTER.validate_python(action)
         s = state.model_copy(deep=True)
+        before = _signature(s)  # an action that changes nothing is a stall, like a rejection
         obs: dict[str, Any]
         if isinstance(parsed, ProposeHypotheses):
             obs = self._propose(s, parsed)
@@ -397,12 +410,40 @@ class InvestigatorProgram:
         elif isinstance(parsed, Conclude):
             obs = self._conclude(s, parsed, ctx)
         else:
-            s.abstained = True
-            s.abstain_reason = parsed.reason[:120]
-            s.missing = sorted(set(parsed.missing) | {m for h in s.hypotheses for m in h.missing})
-            obs = {"abstained": s.abstain_reason}
+            obs = self._abstain(s, parsed, ctx)
+        stalled = "rejected" in obs or "error" in obs or _signature(s) == before
+        s.streak = s.streak + 1 if stalled else 0
+        if s.streak >= ctx.snapshot.cfg.integer("agents", "max_consecutive_rejections"):
+            s.recovering = True  # sticky: alternating with a stuck model would burn the budget
         s.last_observation = obs
         return s, obs
+
+    def needs_playbook(self, state: InvState, ctx: ToolContext) -> bool:
+        """After repeated rejected actions the model is not making progress: the runtime lets
+        the playbook finish the run (a hijacked or confused model cannot burn the budget)."""
+        return state.recovering
+
+    def _abstain(self, s: InvState, a: Abstain, ctx: ToolContext) -> dict[str, Any]:
+        """A model may abstain only where the verifier would: every applicable hypothesis
+        evaluated and no verified conclusion. It cannot abandon an anomaly the evidence
+        supports, nor skip competitors to end early."""
+        subject = _subject(s, ctx)
+        if subject is not None:
+            evaluated = {x.type for x in s.hypotheses if x.evaluated_at >= 0}
+            pending = [
+                d.type for d in hyp.applicable(subject, ctx.snapshot.cfg) if d.type not in evaluated
+            ]
+            verdict = hyp.adjudicate(_evaluations(s), hyp.explains_map(ctx.snapshot.cfg))
+            if pending or verdict.conclusion:
+                s.rejections.append(
+                    f"abstain rejected: pending {pending}; verifier supports {verdict.conclusion}"
+                )
+                return {"rejected": "abstain not justified", "pending": pending,
+                        "verifier": verdict.conclusion}  # fmt: skip
+        s.abstained = True
+        s.abstain_reason = a.reason[:120]
+        s.missing = sorted(set(a.missing) | {m for h in s.hypotheses for m in h.missing})
+        return {"abstained": s.abstain_reason}
 
     def _propose(self, s: InvState, a: ProposeHypotheses) -> dict[str, Any]:
         added, rejected = [], []
@@ -434,6 +475,11 @@ class InvestigatorProgram:
         if not result.ok or result.output is None or result.output_type is None:
             s.rejections.append(f"tool {a.tool} failed: {result.error}")
             return {"tool_call": 1, "error": result.error}
+        existing = next(
+            (e for e in s.evidence if e.tool == a.tool and e.args == result.args), None
+        )
+        if existing is not None:  # already known: no duplicate evidence, and no progress
+            return {"tool_call": 1, "duplicate": existing.evidence_id}
         evidence_id = f"E{len(s.evidence) + 1}"
         s.evidence.append(
             EvidenceItem(

@@ -1,0 +1,28 @@
+# Production overlay: deep-merged over config/asas.toml via ASAS_CONFIG_OVERLAY.
+# Only environment settings belong here; business thresholds stay in the base file so there
+# is one reviewed source of truth. Copy to prod.toml and fill in your identity provider.
+version = "asas-config-2.1.0+prod"
+
+[security]
+environment = "prod"
+mode = "oidc"
+
+[security.oidc]
+issuer = "https://login.example-bank.internal/realms/surveillance"
+audience = "asas"
+jwks_url = "https://login.example-bank.internal/realms/surveillance/protocol/openid-connect/certs"
+
+[storage]
+auto_migrate = false              # the schema owner runs `asas migrate`
+
+[audit]
+anchor_dir = "/var/lib/asas/anchors"   # a write-once mount the database account cannot touch
+
+[pipeline]
+max_workers = 4                   # parallel investigations when the LLM is on
+
+[agents]
+enabled = true
+base_url = "https://llm-gateway.example-bank.internal/v1"
+model_id = "qwen2.5-14b-instruct"
+api_key_env = "ASAS_LLM_API_KEY"

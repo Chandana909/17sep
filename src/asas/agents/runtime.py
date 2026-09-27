@@ -84,6 +84,8 @@ class Counters(BaseModel):
     tool_calls: int = 0
     model_calls: int = 0
     fallbacks: int = 0
+    invalid_replies: int = 0  # model replies that were not a valid action
+    repairs: int = 0  # invalid replies re-asked once with the validation error
     model_errors: list[str] = []
 
 
@@ -105,6 +107,27 @@ class AgentProgram(Protocol[S, R]):
     def done(self, state: S) -> bool: ...
     def exhaust(self, state: S, reason: str) -> S: ...
     def finalize(self, state: S, run_id: str, ctx: ToolContext, counters: Counters) -> R: ...
+
+
+def fit_observation(payload: dict[str, Any], limit: int) -> str:
+    """Serialise an observation within `limit` characters without breaking the JSON: drop
+    the oldest items of the longest list first (older evidence, older rejections), and only
+    as a last resort cut the text. Small models with short context windows get a valid,
+    most-recent view instead of a truncated document."""
+    text = canonical_json(payload)
+    if len(text) <= limit:
+        return text
+    trimmed = json.loads(text)
+    lists = [k for k, v in trimmed.items() if isinstance(v, list) and k != "action_schema"]
+    while len(text) > limit and lists:
+        longest = max(lists, key=lambda k: len(canonical_json(trimmed[k])))
+        if not trimmed[longest]:
+            lists.remove(longest)
+            continue
+        trimmed[longest] = trimmed[longest][1:]
+        trimmed["truncated"] = True
+        text = canonical_json(trimmed)
+    return text if len(text) <= limit else text[:limit]
 
 
 @dataclass(frozen=True)
@@ -251,11 +274,12 @@ class AgentRuntime:
         if counters.model_calls >= budget.max_model_calls:
             counters.fallbacks += 1
             return program.playbook(state, ctx), "playbook-budget"
+        stuck = getattr(program, "needs_playbook", None)
+        if stuck is not None and stuck(state, ctx):
+            counters.fallbacks += 1
+            return program.playbook(state, ctx), "playbook-recovery"
         payload = program.observe(state, ctx)
-        user = canonical_json(payload)
-        limit = self.cfg.integer("agents", "max_prompt_chars")
-        if len(user) > limit:
-            user = user[:limit]
+        user = fit_observation(payload, self.cfg.integer("agents", "max_prompt_chars"))
         error = ""
         for attempt in range(2):
             request = ModelRequest(
@@ -278,7 +302,9 @@ class AgentRuntime:
                 break
             except (json.JSONDecodeError, ValidationError, ActionRejected) as exc:
                 error = f"invalid:{type(exc).__name__}"
+                counters.invalid_replies += 1
                 if attempt == 0 and counters.model_calls < budget.max_model_calls:
+                    counters.repairs += 1
                     continue
                 break
         counters.fallbacks += 1

@@ -14,6 +14,9 @@ asas audit anchor --db <path>                  sign the chain head into audit.an
 asas audit verify --db <path> [--anchors <dir>]
 asas ops show|set --db <path> ...              audited safe mode
 
+asas llm-eval [--model qwen2.5:7b-instruct] [--base-url URL] [--per-scenario 1]
+asas bench [--scales 1,3,10]
+
 asas data profile        --data <dir> [--json]
 asas data draft-mapping  --data <dir> --out config/mappings/<name>.toml
 asas data check          --data <dir> --mapping <file> [--json]
@@ -51,6 +54,7 @@ from asas.services.demo import ADMIN, ANALYST, ruleset_path, run_demo
 from asas.services.evaluation import render_markdown
 from asas.services.integration import capability_matrix, render_matrix
 from asas.services.platform import Platform, build_gateway
+from asas.services.llm_eval import DEFAULT_SCENARIOS as DEFAULT_EVAL_SCENARIOS
 from asas.store.anchor import dump as dump_anchor
 from asas.store.anchor import generate_ed25519_keypair
 from asas.store.db import Store
@@ -195,6 +199,72 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     store = Store(args.db, auto_migrate=True)
     print(f"applied migrations: {store.applied_migrations or 'none (schema current)'}")
     store.close()
+    return 0
+
+
+def cmd_llm_eval(args: argparse.Namespace) -> int:
+    from asas.agents.gateway import OpenAICompatibleGateway
+    from asas.services import llm_eval
+
+    cfg = load_config(args.config)
+    cfg = cfg.with_value(args.max_prompt_chars, "agents", "max_prompt_chars").with_value(
+        args.max_model_calls, "agents", "budgets", "investigator", "max_model_calls"
+    )
+    cfg = cfg.with_value(args.timeout, "agents", "timeout_seconds").with_value(
+        args.timeout * args.max_model_calls, "agents", "budgets", "investigator", "max_seconds"
+    )
+    gateway = OpenAICompatibleGateway(
+        base_url=args.base_url or cfg.string("agents", "base_url"),
+        model_id=args.model or cfg.string("agents", "model_id"),
+        api_key_env=args.api_key_env or None,
+        timeout_seconds=float(args.timeout),
+    )
+    dataset = generate(GeneratorSpec(days=args.days, seed=args.seed))
+    report = llm_eval.run_llm_eval(
+        args.workdir,
+        cfg,
+        dataset,
+        gateway,
+        scenarios=tuple(s for s in args.scenarios.split(",") if s),
+        per_scenario=args.per_scenario,
+    )
+    if args.json:
+        llm_eval.dump(report, args.json)
+    markdown = llm_eval.render_markdown(report, args.note)
+    if args.report:
+        Path(args.report).write_text(markdown, encoding="utf-8")
+    print(markdown)
+    return 0
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    from asas.services import bench
+
+    cfg = load_config(args.config)
+    report = bench.run_bench(
+        args.workdir, cfg, [int(x) for x in args.scales.split(",") if x], days=args.days
+    )
+    markdown = bench.render_markdown(report)
+    if args.report:
+        Path(args.report).write_text(markdown, encoding="utf-8")
+    if args.json:
+        Path(args.json).write_text(json.dumps(report, indent=1), encoding="utf-8")
+    print(markdown)
+    return 0
+
+
+def cmd_propose(args: argparse.Namespace) -> int:
+    from asas.domain.models import BulkScope, RuleSpec
+
+    platform = _platform(args)
+    rule = RuleSpec.model_validate_json(Path(args.rule_file).read_text("utf-8")) if args.rule_file else None
+    scope = None
+    if args.bulk_scope:
+        hypothesis, _, desk = args.bulk_scope.partition("@")
+        scope = BulkScope(hypothesis_type=hypothesis, desk=desk or "*")
+    operator = Principal(user_id=f"cli:{getpass.getuser()}", roles=frozenset({Role.INVESTIGATOR}))
+    candidate = platform.propose(operator, args.rationale, rule, scope)
+    print(f"{candidate.candidate_id} DRAFT; next: replay, counterexamples, shadow, submit, approve")
     return 0
 
 
@@ -343,6 +413,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = with_db(sub.add_parser("migrate", help="apply schema migrations (owner role)"))
     p.set_defaults(func=cmd_migrate)
+
+    p = sub.add_parser("llm-eval", help="evaluate a real model inside the agent runtime")
+    p.add_argument("--model")
+    p.add_argument("--base-url")
+    p.add_argument("--api-key-env", default="")
+    p.add_argument("--workdir", default="out/llm-eval")
+    p.add_argument("--scenarios", default=",".join(DEFAULT_EVAL_SCENARIOS))
+    p.add_argument("--per-scenario", type=int, default=1)
+    p.add_argument("--timeout", type=int, default=300, help="seconds per model call")
+    p.add_argument("--max-model-calls", type=int, default=20)
+    p.add_argument("--max-prompt-chars", type=int, default=12000)
+    p.add_argument("--days", type=int, default=120)
+    p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--report", help="write the markdown report here")
+    p.add_argument("--json", help="write the full JSON report here")
+    p.add_argument("--note", default="")
+    p.set_defaults(func=cmd_llm_eval)
+
+    p = with_db(sub.add_parser("propose", help="propose a rule or bulk scope (governed)"))
+    p.add_argument("--rule-file", help="JSON RuleSpec (same rule_id replaces the rule)")
+    p.add_argument("--bulk-scope", help="HYPOTHESIS@DESK, e.g. PRICE_CORRECTION@FX")
+    p.add_argument("--rationale", required=True)
+    p.set_defaults(func=cmd_propose)
+
+    p = sub.add_parser("bench", help="stage timings at growing data volumes")
+    p.add_argument("--scales", default="1,3,10")
+    p.add_argument("--days", type=int, default=120)
+    p.add_argument("--workdir", default="out/bench")
+    p.add_argument("--report")
+    p.add_argument("--json")
+    p.set_defaults(func=cmd_bench)
 
     p = sub.add_parser("doctor", help="production readiness checks (exit 1 on FAIL)")
     p.add_argument("--db", default="", help="database path or URL to check")

@@ -1,0 +1,9 @@
+# docker-compose overlay: Postgres storage, anchors on a volume, dev identities for a local
+# end-to-end stack. Not for production (security.mode = "dev").
+version = "asas-config-2.1.0+compose"
+
+[storage]
+auto_migrate = false
+
+[audit]
+anchor_dir = "/var/lib/asas/anchors"

@@ -327,3 +327,32 @@ def test_evaluation_beats_rule_only_and_score_only(demo: DemoResult) -> None:
         ev.score_only_baseline["recall_at_k"]
     )
     json.dumps(ev.model_dump(mode="json"))
+
+
+def test_business_rule_change_goes_through_the_governed_chain(
+    tmp_path: Path, cfg: Config, dataset: SyntheticDataset
+) -> None:
+    """A human changes R100's threshold: same rule_id, new parameter. It is validated as DSL,
+    replayed, attacked with counterexamples, shadowed, and released only by a second person."""
+    platform = Platform(tmp_path / "gov.db", cfg)
+    platform.seed_policy(ruleset_path())
+    platform.ingest(dataset.bundle, ADMIN)
+    current = next(r for r in platform.governance.active_bundle().ruleset.rules if r.rule_id == "R100")
+    changed = current.model_copy(update={"parameters": {"min_price_change_pct": "0.5"}})
+    with pytest.raises(GovernanceError, match="not valid DSL"):
+        platform.propose(
+            ANALYST, "bad", current.model_copy(update={"parameters": {}}), None
+        )  # the threshold parameter is missing
+    with pytest.raises(PermissionDenied):
+        platform.propose(
+            Principal(user_id="agent:discovery", roles=frozenset({Role.INVESTIGATOR})), "x", changed
+        )
+    candidate = platform.propose(ANALYST, "business lowered the R100 threshold", changed)
+    assert candidate.kind.value == "DETECTION_RULE" and candidate.proposed_by == ANALYST.user_id
+    with pytest.raises(GovernanceError):  # cannot skip the evidence chain
+        platform.submit(candidate.candidate_id, ANALYST, "skip")
+    platform.evaluate_candidate(candidate.candidate_id, dataset.end, ANALYST)
+    state = platform.governance.state(candidate.candidate_id)
+    assert state.value in ("SHADOW_PASSED", "SHADOW_FAILED", "COUNTEREXAMPLES_FAILED")
+    actions = [e["action"] for e in platform.store.audit_entries(50)]
+    assert "CANDIDATE_PROPOSED" in actions

@@ -45,6 +45,7 @@ from asas.data.ingest import SourceBundle
 from asas.domain.models import (
     BulkPolicy,
     BulkScope,
+    Candidate,
     CandidateKind,
     CandidateState,
     Case,
@@ -69,7 +70,8 @@ from asas.engine.gates import data_gates
 from asas.engine.graph import EvidenceGraph, build_graph, neighborhood
 from asas.engine.hypotheses import Assessment, assess
 from asas.engine.items import episode_items
-from asas.engine.rules import evaluate_ruleset, load_ruleset
+from asas.engine.hypotheses import CATALOG_BY_TYPE
+from asas.engine.rules import evaluate_ruleset, load_ruleset, validate_rule
 from asas.engine.scoring import queue_key
 from asas.engine.snapshot import Snapshot, build_snapshot
 from asas.evolution.counterexamples import CounterexampleReport, attack_bulk, attack_detection
@@ -98,7 +100,7 @@ from asas.store.anchor import (
     verifier_from_config,
     verify_with_anchors,
 )
-from asas.store.db import Store, ts_key
+from asas.store.db import Store, ts_key, utcnow
 
 _log = get_logger("platform")
 
@@ -590,7 +592,10 @@ class Platform:
             if self.cfg.string("audit", "anchor_dir") and self.cfg.boolean(
                 "audit", "anchor_every_run"
             ):
-                self.anchor()
+                try:
+                    self.anchor()
+                except (AnchorError, OSError) as exc:  # the run stands; the lag metric alerts
+                    log_event(_log, "audit.anchor_failed", error=f"{type(exc).__name__}: {exc}")
             return report
 
     def _monitor(
@@ -820,6 +825,47 @@ class Platform:
             return self.governance.state(candidate_id)
         self.shadow_candidate(candidate_id, as_of, principal)
         return self.governance.state(candidate_id)
+
+    def propose(
+        self,
+        principal: Principal,
+        rationale: str,
+        rule: RuleSpec | None = None,
+        bulk_scope: BulkScope | None = None,
+    ) -> Candidate:
+        """A human-authored candidate: a new rule, a changed rule (same rule_id replaces it on
+        release) or a bulk-policy scope. It enters the same governed chain as discovery's
+        proposals: replay -> counterexamples -> shadow -> submit -> four-eyes approval."""
+        require_role(principal, Role.INVESTIGATOR, Role.APPROVER)
+        if principal.user_id.startswith("agent:"):
+            raise PermissionDenied("agents propose through discovery, not as humans")
+        if (rule is None) == (bulk_scope is None):
+            raise GovernanceError("propose exactly one of a rule or a bulk scope")
+        if not rationale.strip():
+            raise GovernanceError("a proposal needs a rationale")
+        if rule is not None:
+            problems = validate_rule(rule, self.cfg)
+            if problems:
+                raise GovernanceError(f"rule is not valid DSL: {problems}")
+        if bulk_scope is not None and bulk_scope.hypothesis_type not in CATALOG_BY_TYPE:
+            raise GovernanceError(f"unknown hypothesis {bulk_scope.hypothesis_type}")
+        payload = rule.model_dump(mode="json") if rule else bulk_scope.model_dump(mode="json")  # type: ignore[union-attr]
+        candidate = Candidate(
+            candidate_id=stable_id("CAND", json.dumps(payload, sort_keys=True), principal.user_id),
+            kind=CandidateKind.DETECTION_RULE if rule else CandidateKind.BULK_POLICY,
+            rule=rule,
+            bulk_scope=bulk_scope,
+            pattern_id="HUMAN-PROPOSAL",
+            rationale=rationale.strip()[:500],
+            proposed_by=principal.user_id,
+            created_at=utcnow(),
+            base_bundle_id=self.governance.active_bundle().bundle_id,
+        )
+        created = self.governance.create(candidate)
+        self.store.audit(
+            principal.user_id, "CANDIDATE_PROPOSED", created.candidate_id, {"kind": created.kind.value}
+        )
+        return created
 
     def submit(self, candidate_id: str, principal: Principal, note: str) -> CandidateState:
         self.governance.submit(candidate_id, principal, note)

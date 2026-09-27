@@ -17,6 +17,7 @@ from asas.agents.discovery import DiscoveryReport
 from asas.agents.gateway import ModelGateway
 from asas.core.config import Config
 from asas.core.logging import get_logger, log_event
+from asas.core.paths import config_dir
 from asas.core.security import SYSTEM, Principal, Role
 from asas.data.synthetic import GeneratorSpec, SyntheticDataset, generate
 from asas.domain.models import CandidateState, LinkStatus, PolicyBundle
@@ -46,7 +47,7 @@ class DemoResult:
 
 
 def ruleset_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "rulesets" / "production-v1.json"
+    return config_dir() / "rulesets" / "production-v1.json"
 
 
 def run_demo(

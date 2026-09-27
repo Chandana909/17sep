@@ -123,3 +123,23 @@ def test_alert_rules_reference_real_metrics() -> None:
 def test_api_paths_still_require_identity_under_metrics(demo: DemoResult, path: str) -> None:
     client = TestClient(create_app(demo.platform))
     assert client.get(path, headers=ANALYST).status_code == 200
+
+
+def test_every_alert_links_an_existing_runbook_section() -> None:
+    rules = yaml.safe_load((ROOT / "deploy" / "prometheus" / "alerts.yml").read_text("utf-8"))
+    docs = {
+        path.relative_to(ROOT).as_posix(): path.read_text("utf-8")
+        for path in (ROOT / "docs").rglob("*.md")
+    }
+    for group in rules["groups"]:
+        for rule in group["rules"]:
+            target = rule["annotations"]["runbook"]
+            page, _, anchor = target.partition("#")
+            assert page in docs, target
+            if anchor:
+                headings = {
+                    re.sub(r"[^a-z0-9 -]", "", line.lstrip("#").strip().lower()).replace(" ", "-")
+                    for line in docs[page].splitlines()
+                    if line.startswith("#")
+                }
+                assert anchor in headings, target

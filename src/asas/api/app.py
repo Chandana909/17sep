@@ -35,7 +35,7 @@ from asas.core.logging import get_logger, log_event
 from asas.core.ratelimit import RateLimiter
 from asas.core.readiness import enforce
 from asas.core.security import Principal
-from asas.domain.models import Case, OutcomeLabel
+from asas.domain.models import BulkScope, Case, OutcomeLabel, RuleSpec
 from asas.engine import evidence as ev
 from asas.engine.graph import neighborhood
 from asas.services.integration import capability_matrix
@@ -81,6 +81,12 @@ class RollbackBody(BaseModel):
 
 class RunBody(BaseModel):
     as_of: datetime | None = None
+
+
+class ProposalBody(BaseModel):
+    rationale: str
+    rule: RuleSpec | None = None
+    bulk_scope: BulkScope | None = None
 
 
 class OpsBody(BaseModel):
@@ -430,6 +436,10 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
                 for c in platform.governance.candidates()
             ]
         )
+
+    @app.post("/api/candidates")
+    def propose(body: ProposalBody, p: Principal = Depends(principal)) -> JSONResponse:
+        return _json(platform.propose(p, body.rationale, body.rule, body.bulk_scope))
 
     @app.get("/api/candidates/{candidate_id}")
     def candidate(candidate_id: str, p: Principal = Depends(principal)) -> JSONResponse:

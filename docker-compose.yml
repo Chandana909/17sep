@@ -1,0 +1,56 @@
+# Local production-like stack: PostgreSQL + schema migration job + ASAS API with anchored audit.
+# Identities are dev headers here (security.mode = "dev"); production uses OIDC (docs/deployment.md).
+#
+#   python -m asas audit keygen --out secrets          # once: audit anchor key pair
+#   docker compose up --build
+#   docker compose run --rm api generate --out /tmp/x --style contract   (or ingest real data)
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: asas
+      POSTGRES_PASSWORD: asas-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d asas"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      ASAS_DATABASE_URL: postgresql://postgres:asas-local-only@db:5432/asas
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      ASAS_DATABASE_URL: postgresql://postgres:asas-local-only@db:5432/asas
+      ASAS_CONFIG_OVERLAY: /app/config/overlays/compose.toml
+      ASAS_AUDIT_SIGNING_KEY: /run/secrets/audit_signing_key
+    ports:
+      - "8000:8000"
+    volumes:
+      - anchors:/var/lib/asas/anchors
+    secrets:
+      - audit_signing_key
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+secrets:
+  audit_signing_key:
+    file: ./secrets/audit-signing-key.pem
+
+volumes:
+  pgdata:
+  anchors:

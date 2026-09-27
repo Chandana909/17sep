@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from asas.core.errors import ConfigMissing
+from asas.core.paths import config_dir
 
 KINDS = (
     "hypotheses",
@@ -63,7 +64,7 @@ class BusinessContext:
 
 
 def default_context_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "business_context.toml"
+    return config_dir() / "business_context.toml"
 
 
 def load_context(path: str | Path | None = None) -> BusinessContext:

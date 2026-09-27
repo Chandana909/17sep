@@ -50,6 +50,8 @@ class ModelResponse(BaseModel):
     text: str
     model_id: str
     cached: bool = False
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class ModelGateway(Protocol):
@@ -110,7 +112,13 @@ class OpenAICompatibleGateway:
             raise ModelError("model returned an unexpected payload") from exc
         if not isinstance(text, str):
             raise ModelError("model returned non-text content")
-        return ModelResponse(text=text, model_id=str(data.get("model", self.model_id)))
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        return ModelResponse(
+            text=text,
+            model_id=str(data.get("model", self.model_id)),
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
 
 
 class ScriptedGateway:

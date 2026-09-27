@@ -1,9 +1,16 @@
 """Versioned configuration. Decision code uses `require`/typed getters; a missing key raises
-`ConfigMissing` and the caller fails safe (individual review). Never invent a default."""
+`ConfigMissing` and the caller fails safe (individual review). Never invent a default.
+
+One base file (`config/asas.toml`) holds every business threshold. Environments differ only
+through overlays (`$ASAS_CONFIG_OVERLAY`, e.g. `config/overlays/prod.example.toml`): small
+TOML files deep-merged on top (tables merge, values and lists replace). The merged result is
+what gets fingerprinted and stamped on every run, so there is still exactly one effective
+configuration per run and no second copy of the thresholds to drift."""
 
 from __future__ import annotations
 
 import copy
+import os
 import tomllib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -12,6 +19,7 @@ from typing import Any
 
 from asas.core.errors import ConfigMissing
 from asas.core.ids import content_hash
+from asas.core.paths import config_dir
 
 
 @dataclass(frozen=True, eq=False)
@@ -93,12 +101,30 @@ class Config:
         return Config(data)
 
 
-def load_config(path: str | Path) -> Config:
+def merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def load_config(path: str | Path, overlays: list[str | Path] | None = None) -> Config:
     with open(path, "rb") as fh:
-        cfg = Config(tomllib.load(fh))
+        data = tomllib.load(fh)
+    extra = overlays
+    if extra is None:
+        env = os.environ.get("ASAS_CONFIG_OVERLAY", "")
+        extra = [p for p in env.split(os.pathsep) if p]
+    for overlay in extra:
+        with open(overlay, "rb") as fh:
+            data = merge(data, tomllib.load(fh))
+    cfg = Config(data)
     cfg.version  # noqa: B018 - fail loudly if unversioned
     return cfg
 
 
 def default_config_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "asas.toml"
+    return Path(os.environ.get("ASAS_CONFIG") or config_dir() / "asas.toml")

@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from asas.core.paths import config_dir
 from asas.data.contract import (
     DECIMAL_FIELDS,
     ENTITIES,
@@ -166,7 +167,7 @@ class Synonyms:
 
 
 def default_synonyms_path() -> Path:
-    return Path(__file__).resolve().parents[3] / "config" / "mapping.synonyms.toml"
+    return config_dir() / "mapping.synonyms.toml"
 
 
 def load_synonyms(path: str | Path | None = None) -> Synonyms:
