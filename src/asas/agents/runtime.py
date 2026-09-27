@@ -21,6 +21,7 @@ from asas.agents.gateway import ModelGateway, ModelRequest
 from asas.agents.prompts import PromptTemplate
 from asas.agents.tools import TOOL_SCHEMA_VERSION, ToolContext, ToolExecutor, ToolResult
 from asas.agents.validation import clean_model_text
+from asas.core import metrics
 from asas.core.config import Config
 from asas.core.errors import ModelError
 from asas.core.ids import canonical_json, content_hash, stable_id
@@ -219,6 +220,10 @@ class AgentRuntime:
                 self._checkpoint(run_id, counters, policy, action, observation, state)
             result = program.finalize(state, run_id, ctx, counters)
             self._finish(run_id, result)
+            metrics.AGENT_RUNS.labels(program.name, mode).inc()
+            metrics.MODEL_CALLS.labels(program.name).inc(counters.model_calls)
+            metrics.AGENT_FALLBACKS.labels(program.name).inc(counters.fallbacks)
+            metrics.MODEL_ERRORS.labels(program.name).inc(len(counters.model_errors))
             log_event(
                 _log,
                 "agent.completed",

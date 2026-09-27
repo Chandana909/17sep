@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from asas.core import metrics
 from asas.core.auth import Authenticator, AuthError, EntitlementError, build_authenticator
 from asas.core.errors import (
     AsasError,
@@ -100,6 +101,7 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
         description="Auditable agentic surveillance: investigate, challenge, discover, evolve.",
     )
     app.state.readiness = readiness
+    metrics.BUILD.labels("2.1.0", cfg.version).set(1)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     @app.middleware("http")
@@ -116,6 +118,10 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
             )
         else:
             response = await call_next(request)
+        route = request.scope.get("route")
+        template = getattr(route, "path", "unmatched")
+        metrics.HTTP_REQUESTS.labels(request.method, template, str(response.status_code)).inc()
+        metrics.HTTP_SECONDS.labels(template).observe(time.perf_counter() - started)
         for name, value in SECURITY_HEADERS.items():
             response.headers.setdefault(name, value)
         if prod:
@@ -140,6 +146,7 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
     async def _errors(_: Request, exc: AsasError) -> JSONResponse:
         status = 400
         if isinstance(exc, AuthError):
+            metrics.AUTH_FAILURES.labels(auth.mode).inc()
             return JSONResponse(
                 {"error": "AuthError", "detail": str(exc)},
                 status_code=401,
@@ -214,6 +221,47 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
             }
         )
 
+    ready_cache: dict[str, Any] = {"at": 0.0, "audit": (False, 0)}
+
+    @app.get("/api/health/live")
+    def live() -> dict[str, str]:
+        """Liveness: the process answers. Never touches dependencies."""
+        return {"status": "alive"}
+
+    @app.get("/api/health/ready")
+    def ready() -> JSONResponse:
+        """Readiness: storage reachable, a policy is active, the audit chain verifies."""
+        problems: list[str] = []
+        try:
+            platform.store.audit_head()
+        except Exception as exc:
+            problems.append(f"storage: {type(exc).__name__}")
+        if not problems:
+            if platform.governance.active_bundle_or_none() is None:
+                problems.append("policy: no active bundle")
+            max_age = cfg.integer("observability", "ready_cache_seconds")
+            if time.monotonic() - ready_cache["at"] > max_age:
+                ready_cache["audit"] = platform.store.verify_audit_chain()
+                ready_cache["at"] = time.monotonic()
+            ok, entries = ready_cache["audit"]
+            metrics.AUDIT_VALID.set(1 if ok else 0)
+            metrics.AUDIT_ENTRIES.set(entries)
+            if not ok:
+                problems.append("audit: chain does not verify")
+        body = {"status": "ready" if not problems else "not_ready", "problems": problems}
+        return JSONResponse(body, status_code=200 if not problems else 503)
+
+    if cfg.boolean("observability", "metrics_enabled"):
+
+        @app.get("/metrics")
+        def prometheus() -> Response:
+            return Response(metrics.exposition(), media_type="text/plain; version=0.0.4")
+
+    @app.get("/api/monitoring/drift")
+    def monitoring(p: Principal = Depends(principal)) -> JSONResponse:
+        report = platform.drift_report()
+        return _json(report if report is not None else {"status": "NO_RUNS", "flags": []})
+
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         ok, entries = platform.store.verify_audit_chain()
@@ -247,6 +295,9 @@ def create_app(platform: Platform, authenticator: Authenticator | None = None) -
                     "model": platform.cfg.string("agents", "model_id"),
                 },
                 "ops": platform.ops.state().model_dump(mode="json"),
+                "drift": (lambda d: d.model_dump(mode="json") if d else None)(
+                    platform.drift_report()
+                ),
                 "user": p.user_id,
             }
         )

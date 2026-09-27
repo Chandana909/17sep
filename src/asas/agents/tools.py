@@ -15,6 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from asas.core import metrics
 from asas.core.errors import PermissionDenied, ToolError, ToolNotAllowed
 from asas.core.ids import content_hash, stable_id
 from asas.core.security import Principal
@@ -315,6 +316,9 @@ class ToolExecutor:
                     lead_only=bool(spec and spec.lead_only),
                     duration_ms=int((time.perf_counter() - started) * 1000),
                 )
+        label = tool if spec is not None else "unknown"
+        metrics.TOOL_CALLS.labels(label, "ok" if result.ok else "error").inc()
+        metrics.TOOL_SECONDS.labels(label).observe(time.perf_counter() - started)
         if self.recorder is not None:
             self.recorder(result, step)
         return result

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -32,6 +33,7 @@ from asas.agents.investigator import InvestigatorProgram
 from asas.agents.memory import Memory
 from asas.agents.runtime import AgentRuntime
 from asas.agents.tools import ToolContext
+from asas.core import metrics as telemetry
 from asas.core.config import Config
 from asas.core.context import BusinessContext, load_context
 from asas.core.errors import AsasError, GovernanceError, PermissionDenied
@@ -84,6 +86,7 @@ from asas.evolution.replay import (
     replay_detection,
 )
 from asas.evolution.shadow import ShadowReport, shadow_bulk, shadow_detection
+from asas.services.monitoring import DriftReport, RunKpis, drift, run_kpis
 from asas.services.ops import Ops
 from asas.store.anchor import (
     Anchor,
@@ -426,9 +429,11 @@ class Platform:
 
     def run_pipeline(self, as_of: datetime, principal: Principal) -> PipelineReport:
         require_role(principal, Role.ADMIN, Role.SERVICE, Role.INVESTIGATOR)
+        started = time.perf_counter()
         try:
-            return self._run_pipeline(as_of, principal)
+            report = self._run_pipeline(as_of, principal)
         except Exception as exc:
+            telemetry.PIPELINE_RUNS.labels("failed").inc()
             self.store.audit(
                 principal.user_id,
                 "PIPELINE_FAILED",
@@ -437,6 +442,22 @@ class Platform:
             )
             log_event(_log, "pipeline.failed", error=type(exc).__name__)
             raise
+        telemetry.PIPELINE_RUNS.labels("degraded" if report.degraded else "ok").inc()
+        telemetry.PIPELINE_SECONDS.observe(time.perf_counter() - started)
+        telemetry.PIPELINE_LAST_SUCCESS.set(time.time())
+        self.refresh_audit_metrics()
+        return report
+
+    def refresh_audit_metrics(self) -> None:
+        ok, entries = self.store.verify_audit_chain()
+        telemetry.AUDIT_VALID.set(1 if ok else 0)
+        telemetry.AUDIT_ENTRIES.set(entries)
+        directory = self.cfg.string("audit", "anchor_dir")
+        if directory:
+            anchors = FileAnchorSink(directory).anchors()
+            last = max((a.seq for a in anchors), default=0)
+            head = self.store.audit_head()
+            telemetry.AUDIT_UNANCHORED.set(max((head[0] if head else 0) - last, 0))
 
     def _investigate_safely(
         self, episode_id: str, as_of: datetime, principal: Principal
@@ -484,6 +505,18 @@ class Platform:
                 outcomes = [
                     self._investigate_safely(ep.episode_id, as_of, principal) for ep in episodes
                 ]
+            for g in failed:
+                telemetry.DATA_GATE_FAILURES.labels(g.name).inc()
+            for entity, times in (
+                ("trade_events", [e.record_time for e in snap.source.trade_events]),
+                ("alerts", [a.record_time for a in snap.source.alerts]),
+            ):
+                if times:
+                    telemetry.DATA_FRESHNESS.labels(entity).set(
+                        (as_of - max(times)).total_seconds()
+                    )
+            telemetry.SAFE_MODE.labels("bulk").set(1 if ops.bulk_suspended else 0)
+            telemetry.SAFE_MODE.labels("llm").set(1 if ops.llm_suspended else 0)
             decided: list[Case] = []
             failures = 0
             for ep, (result, error) in zip(episodes, outcomes, strict=True):
@@ -538,6 +571,9 @@ class Platform:
                 workers=workers,
             )
             self.store.put_latest("pipeline_run", run_key, report)
+            for rec in ("PROPOSED_BULK", "INDIVIDUAL_REVIEW", "ESCALATION_RECOMMENDED"):
+                telemetry.CASES.labels(rec).set(sum(c.recommendation.value == rec for c in cases))
+            self._monitor(run_key, as_of, cases, [r for r, _ in outcomes], snap)
             self.store.audit(
                 principal.user_id,
                 "PIPELINE_RUN",
@@ -556,6 +592,31 @@ class Platform:
             ):
                 self.anchor()
             return report
+
+    def _monitor(
+        self,
+        run_key: str,
+        as_of: datetime,
+        cases: list[Case],
+        results: list[InvestigationResult | None],
+        snap: Snapshot,
+    ) -> DriftReport:
+        kpis = run_kpis(run_key, as_of, cases, results, snap, self.cfg)
+        history = [
+            RunKpis.model_validate_json(p)
+            for _, _, p in self.store.artifact_history("run_kpis", "latest")
+        ]
+        self.store.put_latest("run_kpis", run_key, kpis)
+        report = drift(kpis, history, self.cfg)
+        self.store.put_latest("drift_report", run_key, report)
+        telemetry.DRIFT.clear()
+        for flag in report.flags:
+            telemetry.DRIFT.labels(flag.metric).set(1)
+            log_event(_log, "monitoring.drift", metric=flag.metric, change=str(flag.change))
+        return report
+
+    def drift_report(self) -> DriftReport | None:
+        return self.store.get_model("drift_report", "latest", DriftReport)
 
     def anchor(self) -> Anchor | None:
         """Sign the audit chain head into the external anchor sink (audit.anchor_dir)."""

@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from asas.core import metrics
 from asas.core.errors import ModelError
 from asas.core.ids import canonical_json, content_hash
 from asas.core.logging import get_logger, log_event
@@ -182,11 +183,13 @@ class ResilientGateway:
             try:
                 response = self._inner.complete(request)
                 self.breaker.record(True)
+                metrics.CIRCUIT_OPEN.labels(self.model_id).set(0)
                 return response
             except ModelError as exc:
                 last = exc
                 self.breaker.record(False)
                 if self.breaker.is_open:
+                    metrics.CIRCUIT_OPEN.labels(self.model_id).set(1)
                     break
                 if attempt < self._retries:
                     self._sleep(self._backoff * (2**attempt))

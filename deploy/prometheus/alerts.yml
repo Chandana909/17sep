@@ -1,0 +1,89 @@
+# Prometheus alerting rules for ASAS. Metrics are defined in src/asas/core/metrics.py.
+# Severity: page = act now (controls at risk); ticket = act this business day.
+groups:
+  - name: asas-controls
+    rules:
+      - alert: AsasAuditChainBroken
+        expr: asas_audit_chain_valid == 0
+        for: 1m
+        labels: {severity: page}
+        annotations:
+          summary: "ASAS audit chain does not verify"
+          runbook: "docs/operations.md#audit-chain-broken"
+      - alert: AsasAuditNotAnchored
+        expr: asas_audit_unanchored_entries > 500
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Audit entries are accumulating without an external anchor"
+          runbook: "docs/operations.md#audit-anchoring"
+      - alert: AsasPipelineFailed
+        expr: increase(asas_pipeline_runs_total{outcome="failed"}[1h]) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "An ASAS pipeline run failed"
+          runbook: "docs/operations.md#pipeline-failed"
+      - alert: AsasPipelineStale
+        expr: time() - asas_pipeline_last_success_timestamp > 26 * 3600
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "No successful ASAS pipeline run in 26 hours"
+          runbook: "docs/operations.md#pipeline-failed"
+      - alert: AsasDataGateFailed
+        expr: increase(asas_data_gate_failures_total[6h]) > 0
+        labels: {severity: page}
+        annotations:
+          summary: "A data freshness/volume gate failed; bulk proposals are suspended for the run"
+          runbook: "docs/operations.md#data-gate-failed"
+      - alert: AsasSafeModeOn
+        expr: max(asas_safe_mode) == 1
+        for: 24h
+        labels: {severity: ticket}
+        annotations:
+          summary: "Safe mode has been on for a day; confirm it is still needed"
+          runbook: "docs/operations.md#safe-mode"
+      - alert: AsasDriftDetected
+        expr: max(asas_drift_flag) == 1
+        labels: {severity: ticket}
+        annotations:
+          summary: "Run KPIs drifted from recent history (see /api/monitoring/drift)"
+          runbook: "docs/operations.md#drift"
+
+  - name: asas-agents
+    rules:
+      - alert: AsasModelCircuitOpen
+        expr: max(asas_model_circuit_open) == 1
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Model endpoint circuit open: agents run on the deterministic playbook"
+          runbook: "docs/operations.md#model-outage"
+      - alert: AsasHighFallbackRate
+        expr: >
+          sum(rate(asas_agent_fallbacks_total[1h]))
+          / clamp_min(sum(rate(asas_model_calls_total[1h])), 1) > 0.5
+        for: 30m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Most model replies are invalid or failing; check the model version"
+          runbook: "docs/operations.md#model-outage"
+
+  - name: asas-api
+    rules:
+      - alert: AsasApiErrors
+        expr: >
+          sum(rate(asas_http_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(asas_http_requests_total[5m])), 1) > 0.05
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "More than 5% of ASAS API requests fail"
+          runbook: "docs/operations.md#api-errors"
+      - alert: AsasAuthFailures
+        expr: sum(rate(asas_auth_failures_total[5m])) > 1
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Sustained authentication failures (misconfigured client or probing)"
+          runbook: "docs/security.md"

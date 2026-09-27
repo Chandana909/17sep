@@ -240,6 +240,16 @@ min_assessed_precision = "0.6"
 [governance]
 four_eyes = true
 
+[monitoring]                     # run-KPI drift vs the median of previous runs
+history_runs = 20
+min_history = 3
+rate_tolerance = "0.15"          # absolute change in bulk / escalation / abstention / ... rates
+volume_tolerance = "0.5"         # relative change in case and per-rule alert volumes
+
+[observability]
+metrics_enabled = true           # /metrics (aggregate counters only; restrict at the network)
+ready_cache_seconds = 30         # readiness re-verifies the audit chain at most this often
+
 [policy]
 initial_bulk_scopes = [
   { hypothesis_type = "CANCEL_REBOOK_CORRECTION", desk = "*" },
