@@ -5,6 +5,11 @@ version = "asas-config-2.1.0"
 
 [pipeline]
 review_window_days = 30          # cases are opened for alerts in this window; older data is history
+max_workers = 1                  # parallel investigations (raise with an LLM; I/O bound)
+max_staleness_hours = 96         # data gate: newest record older than this blocks bulk
+volume_window_days = 7           # data gate: records in the last window ...
+volume_baseline_windows = 4      # ... vs the median of this many previous windows
+min_volume_ratio = "0.5"         # ... below this ratio blocks bulk (partial load)
 
 [linking]
 version = "linking-3"
@@ -256,6 +261,9 @@ breaker_threshold = 5
 breaker_reset_seconds = 60
 max_prompt_chars = 16000
 max_output_tokens = 600
+# Ordered fallback endpoints tried when the primary fails (then the deterministic playbook):
+# fallbacks = [{ base_url = "http://gpu-2:8000/v1", model_id = "qwen2.5-14b-instruct", api_key_env = "" }]
+fallbacks = []
 
 [agents.budgets.investigator]
 max_steps = 40

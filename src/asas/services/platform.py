@@ -9,6 +9,7 @@ link confirmation, human outcomes and curation, governed release. Every step is 
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,6 +22,7 @@ from asas.agents.discovery import DiscoveryProgram, DiscoveryReport
 from asas.agents.gateway import (
     CachingGateway,
     CircuitBreaker,
+    FallbackGateway,
     ModelGateway,
     OpenAICompatibleGateway,
     ResilientGateway,
@@ -60,6 +62,7 @@ from asas.domain.models import (
 from asas.engine.challenge import candidate_findings
 from asas.engine.decisions import case_id_for, decide_case, form_cohorts
 from asas.engine.discovery import EpisodeFacts, mine_patterns, synthesize_rule
+from asas.engine.gates import data_gates
 from asas.engine.graph import EvidenceGraph, build_graph, neighborhood
 from asas.engine.hypotheses import Assessment, assess
 from asas.engine.items import episode_items
@@ -80,6 +83,7 @@ from asas.evolution.replay import (
     replay_detection,
 )
 from asas.evolution.shadow import ShadowReport, shadow_bulk, shadow_detection
+from asas.services.ops import Ops
 from asas.store.db import Store, ts_key
 
 _log = get_logger("platform")
@@ -124,6 +128,13 @@ class PipelineReport(BaseModel):
     unresolved_pairs: int
     case_ids: tuple[str, ...]
     cohort_list: tuple[Cohort, ...]
+    degraded: bool = False
+    data_gates: tuple[str, ...] = ()  # failed gates with detail
+    safe_mode: bool = False
+    llm_suspended: bool = False
+    unavailable_fields: tuple[str, ...] = ()
+    rule_gaps: tuple[str, ...] = ()
+    workers: int = 1
 
 
 @dataclass
@@ -134,30 +145,53 @@ class _SnapshotBundle:
     memory: Memory | None = None
 
 
+def _endpoint(spec: dict[str, Any], cfg: Config) -> ModelGateway:
+    return OpenAICompatibleGateway(
+        base_url=str(spec["base_url"]),
+        model_id=str(spec["model_id"]),
+        api_key_env=str(spec.get("api_key_env") or "") or None,
+        timeout_seconds=float(
+            spec.get("timeout_seconds", cfg.integer("agents", "timeout_seconds"))
+        ),
+    )
+
+
 def build_gateway(cfg: Config, store: Store) -> ModelGateway | None:
+    """Primary endpoint plus `[[agents.fallbacks]]`, each resilient, cached as one chain."""
     if not cfg.boolean("agents", "enabled"):
         return None
-    base = OpenAICompatibleGateway(
-        base_url=cfg.string("agents", "base_url"),
-        model_id=cfg.string("agents", "model_id"),
-        api_key_env=cfg.string("agents", "api_key_env") or None,
-        timeout_seconds=float(cfg.integer("agents", "timeout_seconds")),
-    )
-    return wrap_gateway(base, cfg, store)
+    primary = {
+        "base_url": cfg.string("agents", "base_url"),
+        "model_id": cfg.string("agents", "model_id"),
+        "api_key_env": cfg.string("agents", "api_key_env"),
+    }
+    chain = [_endpoint(primary, cfg)] + [
+        _endpoint(dict(spec), cfg) for spec in cfg.require("agents", "fallbacks")
+    ]
+    return wrap_chain(chain, cfg, store)
 
 
-def wrap_gateway(inner: ModelGateway, cfg: Config, store: Store) -> ModelGateway:
+def _resilient(inner: ModelGateway, cfg: Config) -> ModelGateway:
     breaker = CircuitBreaker(
         cfg.integer("agents", "breaker_threshold"),
         float(cfg.integer("agents", "breaker_reset_seconds")),
     )
-    resilient = ResilientGateway(
+    return ResilientGateway(
         inner,
         cfg.integer("agents", "retries"),
         float(cfg.decimal("agents", "backoff_seconds")),
         breaker,
     )
-    return CachingGateway(resilient, store)
+
+
+def wrap_chain(chain: list[ModelGateway], cfg: Config, store: Store) -> ModelGateway:
+    resilient = [_resilient(g, cfg) for g in chain]
+    inner = resilient[0] if len(resilient) == 1 else FallbackGateway(resilient)
+    return CachingGateway(inner, store)
+
+
+def wrap_gateway(inner: ModelGateway, cfg: Config, store: Store) -> ModelGateway:
+    return wrap_chain([inner], cfg, store)
 
 
 class Platform:
@@ -174,6 +208,7 @@ class Platform:
         self.store = Store(store_path)
         self.tracer = tracer or Tracer([StoreSpanExporter(self.store)])
         self.governance = Governance(self.store, cfg)
+        self.ops = Ops(self.store)
         self.runtime = AgentRuntime(cfg, self.store, gateway, self.tracer)
         self._cache: dict[str, _SnapshotBundle] = {}
 
@@ -375,29 +410,68 @@ class Platform:
 
     def run_pipeline(self, as_of: datetime, principal: Principal) -> PipelineReport:
         require_role(principal, Role.ADMIN, Role.SERVICE, Role.INVESTIGATOR)
+        try:
+            return self._run_pipeline(as_of, principal)
+        except Exception as exc:
+            self.store.audit(
+                principal.user_id,
+                "PIPELINE_FAILED",
+                as_of.isoformat(),
+                {"error": type(exc).__name__},
+            )
+            log_event(_log, "pipeline.failed", error=type(exc).__name__)
+            raise
+
+    def _investigate_safely(
+        self, episode_id: str, as_of: datetime, principal: Principal
+    ) -> tuple[InvestigationResult | None, str | None]:
+        """Any agent failure falls back to individual review for that case alone."""
+        try:
+            return self.investigate(episode_id, as_of, principal), None
+        except AsasError as exc:
+            return None, type(exc).__name__
+        except Exception as exc:
+            log_event(_log, "investigation.failed", episode_id=episode_id, error=type(exc).__name__)
+            return None, type(exc).__name__
+
+    def _run_pipeline(self, as_of: datetime, principal: Principal) -> PipelineReport:
+        ops = self.ops.state()
+        self.runtime.llm_suspended = ops.llm_suspended
         with self.tracer.span("pipeline.run", as_of=as_of.isoformat()):
             snap = self.snapshot(as_of)
             graph = self.graph(as_of)
             policy = snap.policy
-            decided: list[Case] = []
-            failures = 0
+            gates = data_gates(snap.source, as_of, self.cfg)
+            failed = [g for g in gates if not g.passed]
+            blocks = (*ops.run_blocks(), *(g.reason for g in failed))
+            for g in failed:
+                log_event(_log, "pipeline.gate", gate=g.name, detail=g.detail)
             review_start = as_of - timedelta(
                 days=self.cfg.integer("pipeline", "review_window_days")
             )
-            for ep in snap.episodes:
-                if not any(snap.alerts_by_id[a].alert_time > review_start for a in ep.alert_ids):
-                    continue
-                result: InvestigationResult | None = None
-                error: str | None = None
-                try:
-                    result = self.investigate(ep.episode_id, as_of, principal)
-                except AsasError as exc:
-                    error = type(exc).__name__
-                except Exception as exc:  # any agent failure falls back to individual review
-                    error = type(exc).__name__
-                    log_event(_log, "investigation.failed", episode_id=ep.episode_id, error=error)
-                if error:
-                    failures += 1
+            episodes = [
+                ep
+                for ep in snap.episodes
+                if any(snap.alerts_by_id[a].alert_time > review_start for a in ep.alert_ids)
+            ]
+            workers = self.cfg.integer("pipeline", "max_workers")
+            if workers > 1:
+                self.memory(as_of)  # build shared read-only state before fanning out
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    outcomes = list(
+                        pool.map(
+                            lambda ep: self._investigate_safely(ep.episode_id, as_of, principal),
+                            episodes,
+                        )
+                    )
+            else:
+                outcomes = [
+                    self._investigate_safely(ep.episode_id, as_of, principal) for ep in episodes
+                ]
+            decided: list[Case] = []
+            failures = 0
+            for ep, (result, error) in zip(episodes, outcomes, strict=True):
+                failures += error is not None
                 decided.append(
                     decide_case(
                         ep,
@@ -410,11 +484,12 @@ class Platform:
                         snap.deviations.get(ep.episode_id),
                         snap.episode_rules(ep.episode_id),
                         snap.signal_set.signals[ep.episode_id].numeric.get("notional_usd_max"),
+                        blocks,
                     )
                 )
             cases, cohorts = form_cohorts(decided, self.cfg)
             cases.sort(key=lambda c: queue_key(c.score, snap.episodes_by_id[c.episode_id]))
-            run_key = stable_id("PIPE", snap.snapshot_id, as_of.isoformat())
+            run_key = stable_id("PIPE", snap.snapshot_id, as_of.isoformat(), *blocks)
             for c in cases:
                 self.store.put_artifact("case", c.case_id, run_key, c)
             for coh in cohorts:
@@ -438,8 +513,15 @@ class Platform:
                 unresolved_pairs=len(snap.linking.unresolved),
                 case_ids=tuple(c.case_id for c in cases),
                 cohort_list=tuple(cohorts),
+                degraded=bool(blocks),
+                data_gates=tuple(f"{g.name}: {g.detail}" for g in failed),
+                safe_mode=ops.bulk_suspended,
+                llm_suspended=ops.llm_suspended,
+                unavailable_fields=tuple(sorted(snap.capabilities.unavailable)),
+                rule_gaps=snap.rule_gaps,
+                workers=workers,
             )
-            self.store.put_artifact("pipeline_run", "latest", run_key, report)
+            self.store.put_latest("pipeline_run", run_key, report)
             self.store.audit(
                 principal.user_id,
                 "PIPELINE_RUN",
@@ -449,6 +531,7 @@ class Platform:
                     "bulk": report.proposed_bulk,
                     "escalation": report.escalation,
                     "policy": policy.bundle_id,
+                    "blocks": list(blocks),
                 },
             )
             log_event(_log, "pipeline.completed", run_key=run_key, cases=report.cases)
@@ -489,7 +572,7 @@ class Platform:
         outcome = self.runtime.run(
             ChallengerProgram(chosen, assessments), f"challenge:{snap.snapshot_id}", ctx
         )
-        self.store.put_artifact("challenge_report", "latest", outcome.result.run_id, outcome.result)
+        self.store.put_latest("challenge_report", outcome.result.run_id, outcome.result)
         self.store.audit(
             principal.user_id,
             "CHALLENGE_RUN",
@@ -533,7 +616,7 @@ class Platform:
         )
         for candidate in outcome.result.candidates:
             self.governance.create(candidate)
-        self.store.put_artifact("discovery_report", "latest", outcome.result.run_id, outcome.result)
+        self.store.put_latest("discovery_report", outcome.result.run_id, outcome.result)
         self.store.audit(
             principal.user_id,
             "DISCOVERY_RUN",

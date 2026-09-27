@@ -129,10 +129,15 @@ class AgentRuntime:
         self.gateway = gateway
         self.tracer = tracer
         self._clock = clock
+        self.llm_suspended = False  # ops safe mode: playbook only, whatever the config says
 
     @property
     def llm_enabled(self) -> bool:
-        return self.gateway is not None and self.cfg.boolean("agents", "enabled")
+        return (
+            self.gateway is not None
+            and self.cfg.boolean("agents", "enabled")
+            and not self.llm_suspended
+        )
 
     def run(
         self,

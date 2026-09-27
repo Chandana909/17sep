@@ -17,6 +17,7 @@ asas data capabilities   --data <dir> --mapping <file> [--json]
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from collections.abc import Sequence
@@ -27,7 +28,7 @@ from typing import Any
 from asas.core.config import default_config_path, load_config
 from asas.core.errors import AsasError
 from asas.core.logging import configure_logging
-from asas.core.security import SYSTEM
+from asas.core.security import SYSTEM, Principal, Role
 from asas.data.ingest import (
     SourceBundle,
     identity_mapping,
@@ -58,6 +59,12 @@ def _as_of(text: str | None, platform: Platform) -> datetime:
     if watermark is None:
         raise AsasError("no data ingested")
     return watermark
+
+
+def _operator() -> Principal:
+    """The CLI is a local, privileged operator interface: whoever can run it against the store
+    already controls the host. Actions are attributed to the OS account in the audit log."""
+    return Principal(user_id=f"cli:{getpass.getuser()}", roles=frozenset({Role.ADMIN}))
 
 
 def _platform(args: argparse.Namespace) -> Platform:
@@ -151,6 +158,19 @@ def cmd_discover(args: argparse.Namespace) -> int:
     report = platform.discover(_as_of(args.as_of, platform), ANALYST)
     for c in report.candidates:
         print(f"{c.candidate_id} {c.kind.value} {c.rule.conditions if c.rule else c.bulk_scope}")
+    return 0
+
+
+def cmd_ops(args: argparse.Namespace) -> int:
+    platform = _platform(args)
+    if args.ops_command == "set":
+        platform.ops.set(
+            _operator(),
+            bulk_suspended=args.bulk == "suspend",
+            llm_suspended=args.llm == "suspend",
+            reason=args.reason,
+        )
+    print(platform.ops.state().model_dump_json(indent=1))
     return 0
 
 
@@ -261,6 +281,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = with_db(sub.add_parser("verify-audit", help="verify the hash-chained audit log"))
     p.set_defaults(func=cmd_verify)
+
+    ops = with_db(sub.add_parser("ops", help="show or set the audited safe mode"))
+    osub = ops.add_subparsers(dest="ops_command", required=True)
+    osub.add_parser("show", help="current safe-mode state")
+    p = osub.add_parser("set", help="suspend or resume bulk proposals and/or the LLM")
+    p.add_argument("--bulk", choices=("suspend", "resume"), required=True)
+    p.add_argument("--llm", choices=("suspend", "resume"), required=True)
+    p.add_argument("--reason", required=True)
+    ops.set_defaults(func=cmd_ops)
 
     data = sub.add_parser("data", help="integrate real extracts: profile, draft, check")
     dsub = data.add_subparsers(dest="data_command", required=True)

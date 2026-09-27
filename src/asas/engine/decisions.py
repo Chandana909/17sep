@@ -78,6 +78,7 @@ def decide_case(
     deviation: DeviationProfile | None = None,
     rules: tuple[str, ...] = (),
     notional_usd: Decimal | None = None,
+    run_blocks: Sequence[str] = (),
 ) -> Case:
     case_id = case_id_for(episode.episode_id)
     reasons: list[str] = []
@@ -117,6 +118,7 @@ def decide_case(
     reasons.extend(f"DEGRADED:{d}" for d in score.degraded if d.split(":")[0] in blocking_degraded)
     blocking_quality = set(cfg.strings("decisions", "blocking_quality_flags"))
     reasons.extend(f"DATA_QUALITY:{f}" for f in episode.quality_flags if f in blocking_quality)
+    reasons.extend(run_blocks)  # run-level blocks: failed data gates, ops safe mode
 
     control = False
     benign = investigation is not None and investigation.conclusion_class is HypothesisClass.BENIGN

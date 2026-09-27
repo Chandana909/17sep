@@ -60,6 +60,12 @@ class RunBody(BaseModel):
     as_of: datetime | None = None
 
 
+class OpsBody(BaseModel):
+    bulk_suspended: bool
+    llm_suspended: bool
+    reason: str
+
+
 def create_app(platform: Platform) -> FastAPI:
     app = FastAPI(
         title="ASAS",
@@ -168,6 +174,7 @@ def create_app(platform: Platform) -> FastAPI:
                     "llm_enabled": platform.runtime.llm_enabled,
                     "model": platform.cfg.string("agents", "model_id"),
                 },
+                "ops": platform.ops.state().model_dump(mode="json"),
                 "user": p.user_id,
             }
         )
@@ -366,6 +373,25 @@ def create_app(platform: Platform) -> FastAPI:
                 "recent": platform.store.audit_entries(min(limit, 500)),
             }
         )
+
+    @app.get("/api/ops")
+    def ops_state(p: Principal = Depends(principal)) -> JSONResponse:
+        return _json(
+            {
+                "state": platform.ops.state().model_dump(mode="json"),
+                "history": [s.model_dump(mode="json") for s in platform.ops.history()[-20:]],
+            }
+        )
+
+    @app.post("/api/ops")
+    def set_ops_state(body: OpsBody, p: Principal = Depends(principal)) -> JSONResponse:
+        state = platform.ops.set(
+            p,
+            bulk_suspended=body.bulk_suspended,
+            llm_suspended=body.llm_suspended,
+            reason=body.reason,
+        )
+        return _json(state.model_dump(mode="json"))
 
     @app.get("/api/context")
     def business_context(p: Principal = Depends(principal)) -> JSONResponse:

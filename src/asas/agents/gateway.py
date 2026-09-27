@@ -2,8 +2,11 @@
 
 `OpenAICompatibleGateway` talks to any /chat/completions endpoint (Qwen via Ollama or vLLM,
 LM Studio, DashScope, hosted models). `ResilientGateway` adds retries with backoff and a
-circuit breaker; `CachingGateway` persists responses by request hash so a run can be replayed
-from its record. `ScriptedGateway` is the deterministic test double.
+circuit breaker per endpoint; `FallbackGateway` tries an ordered chain of endpoints (e.g. a
+local Qwen, then a second host); `CachingGateway` persists responses by request hash so a run
+can be replayed from its record. When every endpoint fails, the agent runtime falls back to the
+deterministic playbook, so an outage degrades speed and depth, never correctness.
+`ScriptedGateway` is the deterministic test double.
 """
 
 from __future__ import annotations
@@ -14,14 +17,17 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from asas.core.errors import ModelError
 from asas.core.ids import canonical_json, content_hash
+from asas.core.logging import get_logger, log_event
 from asas.store.db import Store, ts_key, utcnow
+
+_log = get_logger("gateway")
 
 
 class ModelRequest(BaseModel):
@@ -185,6 +191,32 @@ class ResilientGateway:
                 if attempt < self._retries:
                     self._sleep(self._backoff * (2**attempt))
         raise ModelError(f"model unavailable after retries: {last}")
+
+
+class FallbackGateway:
+    """Ordered endpoint chain: the first endpoint that answers wins. The request is re-issued
+    with each endpoint's own model id; the response records the model that actually answered."""
+
+    def __init__(self, chain: Sequence[ModelGateway]) -> None:
+        if not chain:
+            raise ValueError("FallbackGateway needs at least one endpoint")
+        self.model_id = chain[0].model_id
+        self._chain = tuple(chain)
+
+    def complete(self, request: ModelRequest) -> ModelResponse:
+        errors: list[str] = []
+        for position, gateway in enumerate(self._chain):
+            try:
+                response = gateway.complete(
+                    request.model_copy(update={"model_id": gateway.model_id})
+                )
+            except ModelError as exc:
+                errors.append(f"{gateway.model_id}: {exc}")
+                continue
+            if position:
+                log_event(_log, "gateway.fallback_endpoint", model=gateway.model_id, errors=errors)
+            return response
+        raise ModelError("all model endpoints failed: " + "; ".join(errors))
 
 
 class CachingGateway:

@@ -296,6 +296,12 @@ class Store:
             )
         return digest
 
+    def put_latest(self, kind: str, version: str, obj: Any) -> str:
+        """Point `kind/latest` at `obj`. The pointer is an append-only history: every call
+        becomes the newest entry, even when identical content was latest before, so
+        re-running an earlier run (e.g. after safe mode is lifted) re-points to it."""
+        return self.put_artifact(kind, "latest", f"{ts_key(utcnow())}|{version}", obj)
+
     def get_artifact(self, kind: str, key: str, version: str | None = None) -> str | None:
         with self.reader() as conn:
             if version is None:

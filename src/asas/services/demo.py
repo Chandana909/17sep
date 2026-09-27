@@ -111,7 +111,7 @@ def run_demo(
         released_rules,
         linking_before,
     )
-    platform.store.put_artifact("evaluation", "latest", final.run_key, evaluation)
+    platform.store.put_latest("evaluation", final.run_key, evaluation)
     return DemoResult(
         platform,
         dataset,
