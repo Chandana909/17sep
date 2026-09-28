@@ -274,36 +274,36 @@ None. The system has no Neo4j; the evidence graph is in-memory (`engine/graph.py
 
 | # | Step | Code | T1 | T2 | T3 | T4 | T5 | Done |
 |---|---|---|---|---|---|---|---|---|
-| 1 | items module | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 2 | multi-level + shifted baselines, item index | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 3 | deviation engine | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 4 | data capabilities | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 5 | hypotheses: fields, residual, adjudication | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 6 | deviation tool | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 7 | classification + decisions | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 8 | outlyingness score component | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 9 | new synthetic scenarios | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 10 | evaluation ranking metrics | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 11 | business context catalogue | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 12 | readers | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 13 | mapping transforms + collected validation | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 14 | data CLI | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 15 | fallback gateway chain | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 16 | ops safe mode | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 17 | data gates | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 18 | concurrent pipeline | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 19 | authenticators | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 20 | readiness + doctor | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 21 | API middleware | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 22 | audit anchoring | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 23 | dialects + migrations + Postgres | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 24 | metrics + health | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 25 | drift monitoring | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 26 | UI palette + panels | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 27 | CI, Docker, lock | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 28 | benchmark | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 29 | real-LLM evaluation | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
-| 30 | documentation | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |
+| 1 | items module | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 2 | multi-level + shifted baselines, item index | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 3 | deviation engine | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 4 | data capabilities | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 5 | hypotheses: fields, residual, adjudication | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 6 | deviation tool | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 7 | classification + decisions | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 8 | outlyingness score component | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 9 | new synthetic scenarios | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 10 | evaluation ranking metrics | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 11 | business context catalogue | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 12 | readers | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 13 | mapping transforms + collected validation | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 14 | data CLI | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 15 | fallback gateway chain | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 16 | ops safe mode | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 17 | data gates | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 18 | concurrent pipeline | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 19 | authenticators | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 20 | readiness + doctor | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 21 | API middleware | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 22 | audit anchoring | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 23 | dialects + migrations + Postgres | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 24 | metrics + health | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 25 | drift monitoring | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 26 | UI palette + panels | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| 27 | CI, Docker, lock | [x] | [x] | [ ] | [ ] | [ ] | [x] | [ ] |
+| 28 | benchmark | [x] | [ ] | [ ] | [ ] | [ ] | [x] | [ ] |
+| 29 | real-LLM evaluation | [x] | [x] | [x] | [ ] | [ ] | [x] | [ ] |
+| 30 | documentation | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
 T1 = unit, T2 = property/adversarial, T3 = e2e, T4 = API/UI, T5 = `scripts/check.py` green.
 
@@ -315,3 +315,15 @@ T1 = unit, T2 = property/adversarial, T3 = e2e, T4 = API/UI, T5 = `scripts/check
 - **CPU-only Qwen:** the LLM evaluation uses a small sample; the results are indicative only.
 - **The Docker image** can't be built locally (no Docker); CI builds it.
 - **Business context wording** is a draft for compliance to own; it has no decision effect.
+
+## Status (2026-09-28)
+
+- Steps 1-26 and 30 are done and verified (`scripts/check.py` green: 198 tests incl. PostgreSQL 16 via pgserver).
+- 27: the workflow, Dockerfile, compose file and lockfiles are written; the image and CI have not run yet (no Docker locally). The first CI run is the check.
+- 28: `asas bench` is implemented; the timings are written to `docs/performance.md` once the machine is idle.
+- 29: `asas llm-eval` is implemented and ran on local qwen2.5-coder:7b. It found two runtime bugs (stall counting, and the model looping on no-op actions), both fixed; a re-run with the fixes is in progress.
+- Found and fixed along the way:
+  - an SQLite multi-process audit-chain fork
+  - the stale "latest run" pointer after safe mode
+  - hijacked or looping models burning the budget or steering the run to an abstention
+  - recurrence signals missing from the peer baselines

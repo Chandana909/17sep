@@ -104,7 +104,7 @@ def test_every_table_is_append_only_in_the_database(target: str) -> None:
 def test_readers_cannot_write(target: str) -> None:
     store = Store(target)
     with (
-        pytest.raises(Exception, match="(?i)read.?only|readonly|attempt to write"),
+        pytest.raises(Exception, match=r"(?i)read.?only|readonly|attempt to write"),
         store.reader() as conn,
     ):
         conn.execute("INSERT INTO spans VALUES ('s','t',NULL,'n',0,0,'OK','{}')")

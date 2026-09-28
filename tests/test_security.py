@@ -290,7 +290,7 @@ def test_anchor_files_are_write_once(tmp_path: Path, db_path: Path) -> None:
 def test_pipeline_anchors_automatically_when_configured(
     demo: DemoResult, cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    private, public = generate_ed25519_keypair()
+    private, _ = generate_ed25519_keypair()
     key_file = tmp_path / "key.pem"
     key_file.write_bytes(private)
     monkeypatch.setenv("ASAS_AUDIT_SIGNING_KEY", str(key_file))

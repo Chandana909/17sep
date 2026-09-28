@@ -542,7 +542,7 @@ class _Builder:
 
     def qty_inflation(self, d: date, rng: random.Random) -> None:
         desk = rng.choice(("EQ", "RATES"))
-        product, _, books = DESKS[desk]
+        _, _, books = DESKS[desk]
         book, ins = rng.choice(books), rng.choice(self._instruments[desk])
         t = self.trade_id()
         price = _q(self._base_price[ins])
