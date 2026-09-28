@@ -68,9 +68,8 @@ from asas.engine.decisions import case_id_for, decide_case, form_cohorts
 from asas.engine.discovery import EpisodeFacts, mine_patterns, synthesize_rule
 from asas.engine.gates import data_gates
 from asas.engine.graph import EvidenceGraph, build_graph, neighborhood
-from asas.engine.hypotheses import Assessment, assess
+from asas.engine.hypotheses import CATALOG_BY_TYPE, Assessment, assess
 from asas.engine.items import episode_items
-from asas.engine.hypotheses import CATALOG_BY_TYPE
 from asas.engine.rules import evaluate_ruleset, load_ruleset, validate_rule
 from asas.engine.scoring import queue_key
 from asas.engine.snapshot import Snapshot, build_snapshot
@@ -863,7 +862,10 @@ class Platform:
         )
         created = self.governance.create(candidate)
         self.store.audit(
-            principal.user_id, "CANDIDATE_PROPOSED", created.candidate_id, {"kind": created.kind.value}
+            principal.user_id,
+            "CANDIDATE_PROPOSED",
+            created.candidate_id,
+            {"kind": created.kind.value},
         )
         return created
 

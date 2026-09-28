@@ -110,8 +110,13 @@ def select_sample(
 
 
 def _rejections(platform: Platform, run_id: str) -> int:
-    rows = platform.store.query("SELECT observation FROM agent_steps WHERE run_id = ?", (run_id,))
-    return sum(1 for (obs,) in rows if '"rejected"' in str(obs))
+    """Steps the verifier or validator refused (a non-empty "rejected" in the observation)."""
+    rows = platform.store.query(
+        "SELECT policy, observation FROM agent_steps WHERE run_id = ?", (run_id,)
+    )
+    return sum(
+        1 for policy, obs in rows if policy == "llm" and json.loads(str(obs)).get("rejected")
+    )
 
 
 def run_llm_eval(
@@ -140,7 +145,9 @@ def run_llm_eval(
     if include_injection and not any(i for _, _, i in sample):
         snap = reference.snapshot(dataset.end)
         for ep in sorted(snap.episodes, key=lambda e: e.episode_id):
-            if any((snap.alerts_by_id[a].explanation or "") == INJECTION_TEXT for a in ep.alert_ids):
+            if any(
+                (snap.alerts_by_id[a].explanation or "") == INJECTION_TEXT for a in ep.alert_ids
+            ):
                 scenario = dataset.truth.scenario_by_trade.get(ep.trade_ids[0], "?")
                 sample.append((scenario, ep.episode_id, True))
                 break

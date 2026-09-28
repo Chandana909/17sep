@@ -53,8 +53,8 @@ from asas.engine.rules import load_ruleset
 from asas.services.demo import ADMIN, ANALYST, ruleset_path, run_demo
 from asas.services.evaluation import render_markdown
 from asas.services.integration import capability_matrix, render_matrix
-from asas.services.platform import Platform, build_gateway
 from asas.services.llm_eval import DEFAULT_SCENARIOS as DEFAULT_EVAL_SCENARIOS
+from asas.services.platform import Platform, build_gateway
 from asas.store.anchor import dump as dump_anchor
 from asas.store.anchor import generate_ed25519_keypair
 from asas.store.db import Store
@@ -257,7 +257,11 @@ def cmd_propose(args: argparse.Namespace) -> int:
     from asas.domain.models import BulkScope, RuleSpec
 
     platform = _platform(args)
-    rule = RuleSpec.model_validate_json(Path(args.rule_file).read_text("utf-8")) if args.rule_file else None
+    rule = (
+        RuleSpec.model_validate_json(Path(args.rule_file).read_text("utf-8"))
+        if args.rule_file
+        else None
+    )
     scope = None
     if args.bulk_scope:
         hypothesis, _, desk = args.bulk_scope.partition("@")

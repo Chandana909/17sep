@@ -6,6 +6,8 @@
 |---|---|---|
 | Ingest, run pipeline | admin / service | audited |
 | Investigate, challenge, discover, replay, counterexamples, shadow | investigator, approver, service | agents act with the requester's data scope but never their approval rights |
+| Propose a rule or bulk scope (human) | investigator, approver | `asas propose`, `POST /api/candidates`; validated DSL; same chain as discovered candidates |
+| Safe mode (suspend bulk and/or LLM) | admin | reason required, audited; `asas ops set`, `POST /api/ops` |
 | Confirm an agent-proposed link | investigator, approver (human) | only VERIFIED proposals; becomes a canonical overlay edge |
 | Record a case decision | investigator, approver | stored as a RAW outcome in ASAS; SCP/CAL are never written |
 | Curate an outcome | approver, not the decider (four-eyes) | only CURATED outcomes are ever used as labels |
@@ -14,6 +16,13 @@
 | Reject / roll back | approver | rollback = activate an earlier bundle |
 
 Agents (`agent:*` principals) and service principals are rejected by every governance method. There is no tool for any of these actions.
+
+## Where candidates come from
+
+- **Discovery:** mined patterns (uncaptured risk, recurring benign) synthesised into the smallest DSL rule or a bulk scope.
+- **Humans:** a business-driven change (`docs/playbooks/change-rules-and-policy.md`). A candidate with an existing `rule_id` *replaces* that rule on release (e.g. a new threshold); a new `rule_id` adds one.
+
+Both kinds pass the same gates, and neither can be released by its proposer alone.
 
 ## Candidate lifecycle
 

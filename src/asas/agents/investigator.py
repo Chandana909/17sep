@@ -373,6 +373,11 @@ class InvestigatorProgram:
             ],
             "rejections": state.rejections[-3:],
             "last_observation": state.last_observation,
+            **(
+                {"suggested_action": self.playbook(state, ctx)}
+                if ctx.snapshot.cfg.boolean("agents", "suggest_next_action")
+                else {}
+            ),
             "action_schema": {
                 "propose_hypotheses": {
                     "hypotheses": [{"type": "CATALOG_TYPE", "rationale": "text"}]
@@ -411,7 +416,8 @@ class InvestigatorProgram:
             obs = self._conclude(s, parsed, ctx)
         else:
             obs = self._abstain(s, parsed, ctx)
-        stalled = "rejected" in obs or "error" in obs or _signature(s) == before
+        # an empty "rejected" list (e.g. every proposed type was known) is not a rejection
+        stalled = bool(obs.get("rejected")) or bool(obs.get("error")) or _signature(s) == before
         s.streak = s.streak + 1 if stalled else 0
         if s.streak >= ctx.snapshot.cfg.integer("agents", "max_consecutive_rejections"):
             s.recovering = True  # sticky: alternating with a stuck model would burn the budget
@@ -475,9 +481,7 @@ class InvestigatorProgram:
         if not result.ok or result.output is None or result.output_type is None:
             s.rejections.append(f"tool {a.tool} failed: {result.error}")
             return {"tool_call": 1, "error": result.error}
-        existing = next(
-            (e for e in s.evidence if e.tool == a.tool and e.args == result.args), None
-        )
+        existing = next((e for e in s.evidence if e.tool == a.tool and e.args == result.args), None)
         if existing is not None:  # already known: no duplicate evidence, and no progress
             return {"tool_call": 1, "duplicate": existing.evidence_id}
         evidence_id = f"E{len(s.evidence) + 1}"

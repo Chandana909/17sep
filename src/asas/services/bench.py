@@ -39,41 +39,42 @@ def _scaled(spec: GeneratorSpec, scale: int) -> GeneratorSpec:
     )
 
 
-def run_bench(workdir: str | Path, cfg: Config, scales: list[int], days: int = 120) -> dict[str, Any]:
+def _bench_scale(root: Path, stamp: str, cfg: Config, scale: int, days: int) -> dict[str, Any]:
+    timings: dict[str, float] = {}
+
+    def timed(name: str, fn: Any) -> Any:
+        started = time.perf_counter()
+        out = fn()
+        timings[name] = round(time.perf_counter() - started, 2)
+        return out
+
+    dataset = timed("generate", lambda: generate(_scaled(GeneratorSpec(days=days), scale)))
+    platform = Platform(root / f"bench-{stamp}-x{scale}.db", cfg)
+    platform.seed_policy(ruleset_path())
+    timed("ingest", lambda: platform.ingest(dataset.bundle, ADMIN))
+    snap = timed("snapshot", lambda: platform.snapshot(dataset.end))
+    timed("assess_all", lambda: platform.assessments(dataset.end))
+    report = timed("pipeline", lambda: platform.run_pipeline(dataset.end, SYSTEM))
+    timed("challenge", lambda: platform.challenge(dataset.end, ANALYST))
+    platform.store.close()
+    return {
+        "scale": scale,
+        "trade_events": len(dataset.bundle.trade_events),
+        "alerts": len(dataset.bundle.alerts),
+        "episodes": len(snap.episodes),
+        "cases": report.cases,
+        "seconds": timings,
+        "total_seconds": round(sum(timings.values()), 2),
+        "ms_per_case_pipeline": round(1000 * timings["pipeline"] / max(report.cases, 1), 1),
+    }
+
+
+def run_bench(
+    workdir: str | Path, cfg: Config, scales: list[int], days: int = 120
+) -> dict[str, Any]:
     root = Path(workdir)
     root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-    results = []
-    for scale in scales:
-        timings: dict[str, float] = {}
-
-        def timed(name: str, fn: Any) -> Any:
-            started = time.perf_counter()
-            out = fn()
-            timings[name] = round(time.perf_counter() - started, 2)
-            return out
-
-        dataset = timed("generate", lambda s=scale: generate(_scaled(GeneratorSpec(days=days), s)))
-        platform = Platform(root / f"bench-{stamp}-x{scale}.db", cfg)
-        platform.seed_policy(ruleset_path())
-        timed("ingest", lambda: platform.ingest(dataset.bundle, ADMIN))
-        snap = timed("snapshot", lambda: platform.snapshot(dataset.end))
-        timed("assess_all", lambda: platform.assessments(dataset.end))
-        report = timed("pipeline", lambda: platform.run_pipeline(dataset.end, SYSTEM))
-        timed("challenge", lambda: platform.challenge(dataset.end, ANALYST))
-        results.append(
-            {
-                "scale": scale,
-                "trade_events": len(dataset.bundle.trade_events),
-                "alerts": len(dataset.bundle.alerts),
-                "episodes": len(snap.episodes),
-                "cases": report.cases,
-                "seconds": timings,
-                "total_seconds": round(sum(timings.values()), 2),
-                "ms_per_case_pipeline": round(1000 * timings["pipeline"] / max(report.cases, 1), 1),
-            }
-        )
-        platform.store.close()
     return {
         "host": {
             "python": host.python_version(),
@@ -82,7 +83,7 @@ def run_bench(workdir: str | Path, cfg: Config, scales: list[int], days: int = 1
             "processor": host.processor(),
         },
         "days": days,
-        "results": results,
+        "results": [_bench_scale(root, stamp, cfg, scale, days) for scale in scales],
     }
 
 
@@ -100,7 +101,8 @@ def render_markdown(report: dict[str, Any]) -> str:
     ]
     for r in report["results"]:
         lines.append(
-            f"| {r['scale']}x | {r['trade_events']} | {r['alerts']} | {r['episodes']} | {r['cases']} | "
+            f"| {r['scale']}x | {r['trade_events']} | {r['alerts']} | {r['episodes']} | "
+            f"{r['cases']} | "
             + " | ".join(str(r["seconds"][s]) for s in stages)
             + f" | {r['total_seconds']} | {r['ms_per_case_pipeline']} |"
         )

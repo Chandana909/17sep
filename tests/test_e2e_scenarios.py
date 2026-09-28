@@ -337,7 +337,9 @@ def test_business_rule_change_goes_through_the_governed_chain(
     platform = Platform(tmp_path / "gov.db", cfg)
     platform.seed_policy(ruleset_path())
     platform.ingest(dataset.bundle, ADMIN)
-    current = next(r for r in platform.governance.active_bundle().ruleset.rules if r.rule_id == "R100")
+    current = next(
+        r for r in platform.governance.active_bundle().ruleset.rules if r.rule_id == "R100"
+    )
     changed = current.model_copy(update={"parameters": {"min_price_change_pct": "0.5"}})
     with pytest.raises(GovernanceError, match="not valid DSL"):
         platform.propose(

@@ -1,6 +1,6 @@
 # ADR 0006: Append-only SQLite store with Postgres-portable SQL
 
-**Status:** accepted for release one
+**Status:** superseded for storage by ADR 0013 (PostgreSQL dialect, migrations, least-privilege roles).
 
 **Decision.**
 - **Tables:** one SQLite file with WAL and immutability triggers on every table. Artifacts are content-hashed and versioned.

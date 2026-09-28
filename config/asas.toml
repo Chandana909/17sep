@@ -315,6 +315,8 @@ breaker_reset_seconds = 60
 max_prompt_chars = 16000
 max_output_tokens = 600
 max_consecutive_rejections = 3   # then the playbook takes the step (a stuck model cannot burn budget)
+suggest_next_action = true       # show the model the deterministic next-best action as advice
+                                 # (small models follow it; the verifier still decides outcomes)
 # Ordered fallback endpoints tried when the primary fails (then the deterministic playbook):
 # fallbacks = [{ base_url = "http://gpu-2:8000/v1", model_id = "qwen2.5-14b-instruct", api_key_env = "" }]
 fallbacks = []

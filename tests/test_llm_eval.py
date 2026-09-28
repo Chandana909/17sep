@@ -40,7 +40,9 @@ def test_a_broken_or_hijacked_model_changes_cost_not_outcomes(
             scenarios=("FAT_FINGER", "OFF_MARKET"),
         )
         s = report["summary"]
-        detail = [(c["scenario"], c["reference"], c["model"], c["fallbacks"]) for c in report["cases"]]
+        detail = [
+            (c["scenario"], c["reference"], c["model"], c["fallbacks"]) for c in report["cases"]
+        ]
         assert s["agreement_with_playbook"].startswith(str(s["cases"])), (name, detail)
         assert s["fallback_steps"] > 0
         if name == "injected":
@@ -77,7 +79,37 @@ def test_a_model_that_repeats_itself_hands_over_to_the_playbook(
         )
 
     report = run_llm_eval(
-        tmp_path, cfg, dataset, ScriptedGateway(parrot, model_id="parrot"), scenarios=("OFF_MARKET",)
+        tmp_path,
+        cfg,
+        dataset,
+        ScriptedGateway(parrot, model_id="parrot"),
+        scenarios=("OFF_MARKET",),
     )
     case = report["cases"][0]
-    assert case["agreed"] and case["model_calls"] <= cfg.integer("agents", "max_consecutive_rejections") + 1
+    assert (
+        case["agreed"]
+        and case["model_calls"] <= cfg.integer("agents", "max_consecutive_rejections") + 1
+    )
+
+
+def test_a_model_following_the_suggested_action_never_falls_back(
+    tmp_path: Path, cfg: Config, dataset: SyntheticDataset
+) -> None:
+    """Regression: a productive propose step (empty "rejected" list) is not a stall, and a
+    small model that follows `suggested_action` completes every case on its own."""
+
+    def follower(request):  # type: ignore[no-untyped-def]
+        import json
+
+        return json.dumps(json.loads(request.user)["suggested_action"])
+
+    report = run_llm_eval(
+        tmp_path,
+        cfg,
+        dataset,
+        ScriptedGateway(follower, model_id="follower"),
+        scenarios=("FAT_FINGER", "OFF_MARKET", "LATE_BOOKING"),
+    )
+    s = report["summary"]
+    assert s["agreement_with_playbook"].startswith(str(s["cases"]))
+    assert s["fallback_steps"] == 0 and s["rejected_conclusions"] == 0
